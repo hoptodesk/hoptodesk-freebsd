@@ -1,0 +1,572 @@
+div#file-transfer-wrapper {
+    size:*;
+    display: none;
+}
+
+div#file-transfer {
+    size: *;
+    margin: 0;
+    flow: horizontal;
+    background: color(gray-bg);
+    padding: 6px;
+    border-spacing: 6px;
+}
+
+/* -- Tables --------------------------------------- */
+
+table
+{
+  font: system;
+  border: 1px solid color(border);
+  border-radius: 6px;
+  overflow: hidden;
+  flow: table-fixed;
+  prototype: Grid;
+  size: *;
+  padding: 0;
+  border-spacing: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+table > thead {
+  behavior: column-resizer;
+  border-bottom: color(border) solid 1px;
+}
+
+table > tbody {
+  behavior: select-multiple;
+  overflow-y: scroll-indicator;
+  size: *;
+  background: white;
+}
+
+table th {
+  background-color: #f7f8fa;
+  font-weight: 600;
+  font-size: 0.9em;
+  color: color(light-text);
+}
+
+table th
+{
+  padding: 6px 8px;
+  foreground-repeat: no-repeat;
+  foreground-position: 50% 3px auto auto;
+  border-left: color(border) solid 1px;
+}
+
+table th:nth-child(1) {
+  border-left: none;
+}
+
+table th.sortable[sort=asc]
+{
+  foreground-image: url(stock:arrow-down);
+}
+
+table th.sortable[sort=desc]
+{
+  foreground-image: url(stock:arrow-up);
+}
+
+table th:nth-child(1)  {
+    width: 32px;
+}
+
+table th:nth-child(2)  {
+    width: *;
+}
+
+table th:nth-child(3)  {
+    width: *;
+}
+
+table th:nth-child(4)  {
+  width: 45px;
+}
+
+table.has_current thead th:current {
+  font-weight: bold;
+  color: color(text);
+}
+
+table tr:nth-child(odd) { background-color: white; }
+table tr:nth-child(even) { background-color: #f9fafb; }
+
+table.has_current tr:current
+{
+  background-color: color(accent);
+}
+
+table.has_current tbody tr:checked
+{
+  background-color: color(accent);
+}
+
+table.has_current tbody tr:checked td {
+  color: highlighttext;
+}
+
+/* Drag-and-drop drop target feedback */
+table[drag-over] {
+  border: 2px dashed #2C8CFF;
+}
+
+table[drag-over] > tbody {
+  background: #E8F4FF;
+}
+
+table td
+{
+  padding: 5px 8px;
+  text-align: left;
+  font-size: 1em;
+  height: 1.4em;
+  @ELLIPSIS;
+}
+
+table.folder-view td:nth-child(1) {
+  behavior:shell-icon;
+}
+
+table td:nth-child(3), table td:nth-child(4) {
+  color: color(lighter-text);
+  font-size: 0.9em;
+}
+
+table.has_current tr:current td {
+  color: white;
+}
+
+table td:nth-child(4) {
+  text-align: right;
+}
+
+/* -- Sections (file panels) ----------------------- */
+
+section {
+  size: *;
+  background: color(bg);
+  border-radius: 8px;
+  padding: 0.8em;
+  border-spacing: 0.5em;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+}
+
+table td:nth-child(1)  {
+  foreground-repeat: no-repeat;
+  foreground-position: 50% 50%
+}
+
+/* -- Toolbar -------------------------------------- */
+
+div.toolbar {
+  flow: horizontal;
+}
+
+div.toolbar svg {
+  size: 16px;
+}
+
+div.toolbar .spacer {
+  width: *;
+}
+
+div.toolbar > div.button {
+  padding: 5px 8px;
+  opacity: 0.55;
+  border-radius: 4px;
+}
+
+div.toolbar > div.button:active {
+  opacity: 1;
+  background-color: color(menu-hover);
+}
+
+div.toolbar > div.button:hover {
+  opacity: 1;
+  background-color: color(gray-bg);
+}
+
+div.toolbar > div.send {
+  flow: horizontal;
+  border-spacing: 0.4em;
+  padding: 4px 10px;
+  border: color(button) 1px solid;
+  border-radius: 4px;
+  opacity: 1;
+  background: transparent;
+}
+
+div.toolbar > div.send:hover {
+  background: color(button);
+}
+
+div.toolbar > div.send:hover span {
+  color: white;
+}
+
+div.toolbar > div.send:hover svg {
+  color: white;
+}
+
+div.toolbar > div.send span {
+  font-weight: 600;
+  color: color(button);
+}
+
+div.toolbar > div.send svg {
+  color: color(button);
+}
+
+div.remote > div.send svg {
+  transform: scale(-1, 1);
+}
+
+/* -- Navigation bar ------------------------------- */
+
+div.navbar {
+  border: color(border) solid 1px;
+  border-radius: 6px;
+  padding: 3px 4px;
+  background: color(bg);
+}
+
+select.select-dir {
+  width: *;
+  padding: 0 4px;
+}
+
+/* -- Title (Local / Remote Computer) -------------- */
+
+div.title {
+  flow: horizontal;
+  border-spacing: 1em;
+  position: relative;
+}
+
+div.title svg.computer {
+  size: 42px;
+}
+
+div.title div {
+  margin: * 0;
+  color: color(light-text);
+  font-weight: 600;
+}
+
+div.title div.platform {
+  position: absolute;
+  left: 10px;
+  top: 6px;
+}
+
+div.title div.platform svg {
+  size: 22px;
+}
+
+/* -- Job table (transfer progress) ---------------- */
+
+table.job-table {
+  border-radius: 6px;
+}
+
+table.job-table tr td {
+  width: *;
+  padding: 0.6em 1em;
+  border-bottom: color(border) 1px solid;
+  flow: horizontal;
+  border-spacing: 0.8em;
+  height: 3em;
+  overflow-x: hidden;
+}
+
+table.job-table tr svg {
+  size: 16px;
+}
+
+table.job-table tr svg.cancel:hover {
+  color: color(blood-red);
+}
+
+table.job-table tr.is_remote svg {
+  transform: scale(-1, 1);
+}
+
+table.job-table tr.is_remote div.svg_continue svg {
+  transform: scale(1, 1);
+}
+
+table.job-table tr td div.text {
+  width: *;
+  overflow-x: hidden;
+}
+
+table.job-table tr td div.path {
+  width: *;
+  color: color(light-text);
+  font-size: 0.9em;
+  @ELLIPSIS;
+}
+
+table.job-table tr:current td div.path {
+  color: white;
+}
+
+/* -- Port forward table --------------------------- */
+
+table#port-forward thead tr th {
+  padding-left: 1em;
+  size: *;
+}
+
+table#port-forward tr td {
+  height: 3em;
+  text-align: left;
+}
+
+table#port-forward input[type=text], table#port-forward input[type=number] {
+  font-size: 1.2em;
+}
+
+table#port-forward td.right-arrow svg {
+  size: 1.2em;
+  transform: rotate(180deg);
+}
+
+table#port-forward td.remove svg {
+  size: 0.8em;
+}
+
+table#port-forward tr.value td {
+  padding-left: 1em;
+  font-size: 1.5em;
+  color: black;
+}
+
+/* -- Per-tunnel status dots ----------------------- */
+
+.pf-status-dot {
+  size: 8px;
+  border-radius: 50%;
+  margin: auto;
+}
+
+.pf-status-dot.listening {
+  background: #FBC02D;
+}
+
+.pf-status-dot.connected {
+  background: #4CAF50;
+}
+
+.pf-status-dot.error {
+  background: #EF5350;
+  cursor: pointer;
+}
+
+td.status-cell {
+  text-align: center;
+  width: 3em;
+}
+
+/* -- RDP Mode Layout Override ---------------------- */
+
+div#file-transfer.rdp-mode {
+  flow: vertical;
+  padding: 16px;
+}
+
+/* -- RDP Toolbar UI -------------------------------- */
+
+.rdp-status {
+  padding: 12px 16px;
+  border-radius: 6px;
+  margin-bottom: 12px;
+}
+
+.rdp-status.initializing {
+  background: color(gray-bg);
+  color: color(light-text);
+}
+
+.rdp-status.waiting {
+  background: #FFF8E1;
+  color: #795548;
+}
+
+.rdp-status.connected {
+  background: #E8F5E9;
+  color: #2E7D32;
+}
+
+.rdp-status.error {
+  background: #FFEBEE;
+  color: #C62828;
+}
+
+.rdp-status-left {
+  flow: horizontal;
+  vertical-align: middle;
+}
+
+.rdp-status-dot {
+  size: 10px;
+  border-radius: 50%;
+  margin-right: 10px;
+  margin-top: 5px;
+}
+
+.rdp-status-dot.waiting {
+  background: #FBC02D;
+}
+
+.rdp-status-dot.connected {
+  background: #4CAF50;
+}
+
+.rdp-status-dot.error {
+  background: #EF5350;
+}
+
+.rdp-status-spinner {
+  size: 12px;
+  margin-right: 10px;
+  margin-top: 4px;
+  border: 2px solid color(border);
+  border-top-color: color(button);
+  border-radius: 50%;
+}
+
+.rdp-status-text {
+  flow: vertical;
+}
+
+.rdp-status-main {
+  font-size: 1.1em;
+  font-weight: 600;
+  display: block;
+}
+
+.rdp-status-sub {
+  font-size: 0.85em;
+  opacity: 0.7;
+  display: block;
+  margin-top: 2px;
+}
+
+.rdp-toolbar {
+  flow: horizontal;
+  padding: 16px;
+  background: color(bg);
+  border: 1px solid color(border);
+  border-radius: 6px;
+  margin-bottom: 12px;
+  vertical-align: middle;
+}
+
+.rdp-toolbar-info {
+  width: *;
+}
+
+.rdp-info-row {
+  flow: horizontal;
+  vertical-align: middle;
+}
+
+.rdp-label {
+  color: color(light-text);
+  font-size: 0.95em;
+  margin-right: 6px;
+}
+
+.rdp-value {
+  font-size: 1.1em;
+  font-weight: 600;
+  color: color(text);
+  margin-right: 8px;
+}
+
+.rdp-via {
+  font-size: 0.85em;
+  color: color(lighter-text);
+  padding: 2px 8px;
+  background: color(gray-bg);
+  border-radius: 4px;
+}
+
+.rdp-toolbar-actions {
+  vertical-align: middle;
+}
+
+/* -- RDP Settings Panel --------------------------- */
+
+.rdp-settings {
+  border: 1px solid color(border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.rdp-settings-header {
+  flow: horizontal;
+  padding: 10px 16px;
+  background: color(gray-bg);
+  cursor: pointer;
+  vertical-align: middle;
+}
+
+.rdp-settings-header:hover {
+  background: color(menu-hover);
+}
+
+.rdp-settings-header > span:first-child {
+  width: *;
+  font-weight: 600;
+  color: color(text);
+}
+
+.rdp-settings-toggle {
+  color: color(lighter-text);
+  font-size: 0.8em;
+}
+
+.rdp-settings-body {
+  padding: 16px;
+  background: color(bg);
+  border-top: 1px solid color(border);
+}
+
+.rdp-settings-row {
+  flow: horizontal;
+  margin-bottom: 10px;
+  vertical-align: middle;
+}
+
+.rdp-settings-row > label {
+  width: 100px;
+  text-align: right;
+  margin-right: 10px;
+  color: color(light-text);
+  line-height: 2em;
+}
+
+.rdp-settings-row > input[type=text],
+.rdp-settings-row > input[type=password] {
+  width: *;
+  font-size: 1em;
+}
+
+.rdp-settings-row > div.password {
+  width: *;
+}
+
+.rdp-settings-row > div.password > input {
+  width: *;
+  font-size: 1em;
+}
+
+.rdp-settings-actions {
+  text-align: right;
+  margin-top: 8px;
+}

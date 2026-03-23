@@ -1,0 +1,165 @@
+[package]
+name = "hoptodesk"
+version = "1.45.10"
+authors = ["hoptodesk <info@hoptodesk.com>"]
+edition = "2021"
+build= "build.rs"
+description = "A remote control software."
+default-run = "hoptodesk"
+rust-version = "1.75"
+
+[lib]
+name = "libhoptodesk"
+crate-type = ["cdylib", "staticlib", "rlib"]
+
+
+[features]
+inline = []
+standalone = []
+cli = []
+use_samplerate = ["samplerate"]
+use_rubato = ["rubato"]
+use_dasp = ["dasp"]
+default = ["use_dasp", "linux-pkg-config"]
+hwcodec = ["scrap/hwcodec"]
+vram = []
+plugin_framework = []
+linux-pkg-config = ["magnum-opus/linux-pkg-config", "scrap/linux-pkg-config"]
+unix-file-copy-paste = []
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+async-trait = "0.1"
+scrap = { path = "libs/scrap", features = ["wayland"] }
+hbb_common = { path = "libs/hbb_common" }
+serde_derive = "1.0"
+serde = "1.0"
+serde_json = { version = "1.0", features = ["preserve_order"] }
+serde_repr = "0.1"
+cfg-if = "1.0"
+lazy_static = "1.4"
+sha2 = "0.10"
+repng = "0.2"
+parity-tokio-ipc = { git = "https://github.com/rustdesk-org/parity-tokio-ipc" }
+magnum-opus = { path = "libs/magnum-opus" }
+dasp = { version = "0.11", features = ["signal", "interpolate-linear", "interpolate"], optional = true }
+rubato = { version = "0.12", optional = true }
+samplerate = { version = "0.2", optional = true }
+uuid = { version = "1.3", features = ["v4"] }
+clap = "4.2"
+rpassword = "7.2"
+num_cpus = "1.15"
+bytes = { version = "1.4", features = ["serde"] }
+default-net = { path = "libs/default-net" }
+wol-rs = "1.0"
+errno = "0.3"
+rdev = { path = "libs/rdev" }
+url = { version = "=2.4.0", features = ["serde"] }
+crossbeam-queue = "0.3"
+hex = "0.4.3"
+chrono = "0.4.41"
+cidr-utils = "0.5"
+soketto = "0.7"
+turn = { path = "libs/turn" }
+tokio-rustls = "0.24"
+webpki-roots = "0.26.7"
+webrtc-util = "0.7"
+futures = "0.3"
+fon = "0.6"
+shutdown_hooks = "0.1"
+totp-rs = { version = "5.4", default-features = false, features = ["gen_secret", "otpauth"] }
+tokio-socks = { git = "https://github.com/rustdesk-org/tokio-socks" }
+ringbuf = "0.3"
+open = "5.0"
+
+# Desktop dependencies (non-mobile)
+mac_address = "1.1"
+sys-locale = "0.3"
+enigo = { path = "libs/enigo", features = [ "with_serde" ] }
+clipboard = { path = "libs/clipboard" }
+ctrlc = "3.2"
+arboard = { path = "libs/arboard", features = ["wayland-data-control"] }
+clipboard-master = { git = "https://github.com/rustdesk-org/clipboard-master" }
+system_shutdown = { path = "libs/system_shutdown" }
+qrcode-generator = "4.1"
+
+# wry/tao for WebView UI (replaces Sciter)
+wry = { path = "libs/wry" }
+tao = "0.30"
+webkit2gtk = "2.0"
+
+# Audio via cpal (not PulseAudio)
+cpal = { git = "https://github.com/rustdesk-org/cpal", branch = "osx-screencapturekit" }
+
+# TLS
+tokio-tungstenite = { version = "^0.21.0", features = ["native-tls-vendored"] }
+native-tls = { version = "0.2.10", features = ["vendored"] }
+reqwest = { git = "https://github.com/rustdesk-org/reqwest", features = ["blocking", "socks", "json", "native-tls-vendored", "gzip", "multipart"], default-features=false }
+
+# FreeBSD/Unix dependencies (similar to Linux)
+libxdo-sys = "0.11"
+async-process = "1.7"
+dbus = "0.9"
+dbus-crossroads = "0.5"
+# pam = { git="https://github.com/rustdesk-org/pam" }  # Disabled: FreeBSD PAM bindings differ from Linux
+xrandr-parser = "0.3.0"
+users = { version = "0.11" }
+x11-clipboard = {git="https://github.com/clslaid/x11-clipboard", branch = "feat/store-batch", optional = true}
+keepawake = { path = "libs/keepawake" }
+nix = { version = "0.29", features = ["term", "process"]}
+gtk = "0.18"
+termios = "0.3"
+terminfo = "0.8"
+winit = "0.30"
+
+# Tray and rendering
+tray-icon = { path = "libs/tray-icon" }
+image = "=0.24.7"
+wallpaper = { git = "https://github.com/rustdesk-org/wallpaper.rs" }
+tiny-skia = "0.11"
+softbuffer = "0.4"
+fontdb = "0.23"
+bytemuck = "1.23"
+ttf-parser = "0.25"
+
+[workspace]
+members = ["libs/scrap", "libs/hbb_common", "libs/enigo", "libs/clipboard", "libs/virtual_display", "libs/turn", "libs/privacyhelper"]
+exclude = ["vdi/host", "examples/custom_plugin"]
+
+[patch.crates-io]
+libxdo-sys = { path = "libs/libxdo-sys-stub" }
+muda = { path = "libs/muda" }
+
+[package.metadata.winres]
+LegalCopyright = "Copyright © 2026 Begonia Holdings.  Copyright © 2026 Purslane Ltd."
+ProductName = "HopToDesk"
+FileDescription = "HopToDesk"
+CompanyName = "Begonia Holdings"
+
+[build-dependencies]
+cc = "1.0"
+hbb_common = { path = "libs/hbb_common" }
+os-version = "0.2"
+
+[dev-dependencies]
+hound = "3.5"
+
+[package.metadata.bundle]
+name = "HopToDesk"
+identifier = "com.hoptodesk.hoptodesk"
+icon = ["res/32x32.png", "res/128x128.png", "res/128x128@2x.png"]
+
+[profile.dev]
+debug = false
+incremental = false
+
+
+#https://github.com/johnthagen/min-sized-rust
+[profile.release]
+lto = true
+codegen-units = 1
+panic = 'abort'
+strip = true
+opt-level = 'z' # only have smaller size after strip
+rpath = true

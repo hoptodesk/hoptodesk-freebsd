@@ -1,0 +1,520 @@
+function self.ready() {
+    centerize(scaleIt(700), scaleIt(490));
+    var root_element = self;
+    if (handler.get_option("allow-darktheme") == "Y") {
+        root_element.attributes.toggleClass("darktheme", true);
+    } else {
+        root_element.attributes.toggleClass("darktheme", false);
+    }
+}
+
+var current_ticket_id = 0;
+var attached_files = [];
+var tickets_data = [];
+var poll_timer = null;
+var last_message_count = 0;
+var last_reply_counter = 0;
+var has_new_reply = false;
+var notification_hide_timer = null;
+
+class TicketApp: Reactor.Component {
+    function render() {
+        return <div .content>
+            <div .tabs>
+                <div #tab-new .active>{translate("New Ticket")}</div>
+                <div #tab-my>{translate("My Tickets")}</div>
+            </div>
+            <div #notification-bar style="display:none">
+                <span #notification-text></span>
+                <span #notification-dismiss title="Dismiss">{"\u00D7"}</span>
+            </div>
+            <div .tab-content>
+                <div #panel-new .tab-panel .active>
+                    <NewTicketForm />
+                </div>
+                <div #panel-my .tab-panel>
+                    <MyTickets />
+                </div>
+            </div>
+        </div>;
+    }
+
+    event click $(#tab-new) {
+        this.switchTab("new");
+    }
+
+    event click $(#tab-my) {
+        has_new_reply = false;
+        removeBadge();
+        this.switchTab("my");
+        this.loadTickets();
+    }
+
+    event click $(#notification-dismiss) {
+        hideNotification();
+    }
+
+    function switchTab(name) {
+        for (var tab in this.$$(.tabs > div)) {
+            tab.attributes.removeClass("active");
+        }
+        for (var panel in this.$$(.tab-panel)) {
+            panel.attributes.removeClass("active");
+        }
+        if (name == "new") {
+            this.$(#tab-new).attributes.addClass("active");
+            this.$(#panel-new).attributes.addClass("active");
+        } else {
+            this.$(#tab-my).attributes.addClass("active");
+            this.$(#panel-my).attributes.addClass("active");
+        }
+        var conv = this.$(#conversation-view);
+        if (conv) conv.attributes.removeClass("active");
+        var list = this.$(#ticket-list-container);
+        if (list) list.style.set { display: "block" };
+        if (poll_timer !== null) {
+            self.timer(0, poll_timer);
+            poll_timer = null;
+        }
+        current_ticket_id = 0;
+        last_message_count = 0;
+    }
+
+    function loadTickets() {
+        refreshTickets();
+    }
+
+}
+
+class NewTicketForm: Reactor.Component {
+    function render() {
+        return <div>
+            <div .form-group>
+                <label>{translate("Email")}</label>
+                <input|text #ticket-email novalue={translate("Your email address")} />
+            </div>
+            <div .form-group>
+                <label>{translate("Subject")}</label>
+                <input|text #ticket-subject novalue={translate("Brief description of the issue")} />
+            </div>
+            <div .form-group>
+                <label>{translate("Description")}</label>
+                <textarea #ticket-description novalue={translate("Describe your issue in detail")} />
+            </div>
+            <div .form-row>
+                <div .form-group>
+                    <label>{translate("Priority")}</label>
+                    <select #ticket-priority>
+                        <option value="low">{translate("Low")}</option>
+                        <option value="medium" selected>{translate("Medium")}</option>
+                        <option value="high">{translate("High")}</option>
+                        <option value="urgent">{translate("Urgent")}</option>
+                    </select>
+                </div>
+                <div .form-group>
+                    <label>{translate("Attachment")}</label>
+                    <div .attachment-row>
+                        <button .file-btn #add-file>{translate("Add File")}</button>
+                        <span .file-name #file-name></span>
+                        <span .file-remove #file-remove style="display:none">{"\u00D7"}</span>
+                    </div>
+                </div>
+            </div>
+            <div .form-actions>
+                <button .button .outline #btn-cancel style="margin-right: 1em;">{translate("Cancel")}</button>
+                <button .button #btn-submit>{translate("Submit Ticket")}</button>
+            </div>
+        </div>;
+    }
+
+    event click $(#add-file) {
+        var path = view.selectFile(#open, "All Files (*.*)|*.*");
+        if (path && path != "") {
+            path = path.toString();
+            if (path.indexOf("file:///") == 0) path = path.substr(8);
+            else if (path.indexOf("file://") == 0) path = path.substr(7);
+            var sizeStr = handler.get_file_size(path);
+            var fileSize = (sizeStr || "0").toInteger();
+            if (fileSize > 5242880) {
+                var sizeMB = (fileSize / 1048576.0).toFixed(1);
+                msgbox("custom-error", translate("Error"), translate("File size") + " (" + sizeMB + " MB) " + translate("exceeds 5MB limit. Please choose a smaller file."));
+                return;
+            }
+            attached_files = [path];
+            this.refreshFiles();
+        }
+    }
+
+    function refreshFiles() {
+        var nameEl = this.$(#file-name);
+        var removeEl = this.$(#file-remove);
+        if (!nameEl || !removeEl) return;
+        if (attached_files.length > 0) {
+            var f = attached_files[0];
+            var name = f;
+            var idx = f.lastIndexOf("\\");
+            if (idx < 0) idx = f.lastIndexOf("/");
+            if (idx >= 0) name = f.substr(idx + 1);
+            var sizeStr = handler.get_file_size(f);
+            var fileSize = (sizeStr || "0").toInteger();
+            nameEl.text = name + " (" + formatSize(fileSize) + ")";
+            removeEl.style.set { display: "inline" };
+        } else {
+            nameEl.text = "";
+            removeEl.style.set { display: "none" };
+        }
+    }
+
+    event click $(#file-remove) {
+        attached_files = [];
+        this.refreshFiles();
+    }
+
+    event click $(#btn-cancel) {
+        view.close();
+    }
+
+    event click $(#btn-submit) {
+        var email = this.$(#ticket-email).value || "";
+        var subject = this.$(#ticket-subject).value || "";
+        var description = this.$(#ticket-description).value || "";
+        var priority = this.$(#ticket-priority).value || "medium";
+
+        if (subject.trim() == "") {
+            msgbox("custom-error", translate("Error"), translate("Subject is required"));
+            return;
+        }
+        if (description.trim() == "") {
+            msgbox("custom-error", translate("Error"), translate("Description is required"));
+            return;
+        }
+
+        this.$(#btn-submit).state.disabled = true;
+
+        var result = handler.submit_ticket(email, subject, description, priority);
+        try {
+            var data = parseData(result);
+            if (data && data.ticket_id) {
+                var ticket_id = data.ticket_id;
+                var upload_errors = [];
+                for (var f in attached_files) {
+                    var ures = handler.upload_attachment(ticket_id.toString(), f);
+                    try {
+                        var ud = parseData(ures);
+                        if (ud && ud.success == false) {
+                            upload_errors.push(ud.error || "upload failed");
+                        }
+                    } catch(ue) {
+                        upload_errors.push(ue.toString());
+                    }
+                }
+                if (upload_errors.length > 0) {
+                    msgbox("custom-error", translate("Error"), translate("Ticket submitted but attachment upload failed: ") + upload_errors.join(", "));
+                } else {
+                    msgbox("custom-nocancel-success", translate("Success"), translate("Ticket submitted successfully!"));
+                }
+                this.$(#ticket-email).value = "";
+                this.$(#ticket-subject).value = "";
+                this.$(#ticket-description).value = "";
+                this.$(#ticket-priority).value = "medium";
+                attached_files = [];
+                this.refreshFiles();
+            } else {
+                var msg = translate("Failed to submit ticket");
+                if (data && data.error) msg = data.error;
+                msgbox("custom-error", translate("Error"), msg);
+            }
+        } catch(e) {
+            msgbox("custom-error", translate("Error"), translate("Failed to submit ticket") + ": " + e);
+        }
+        this.$(#btn-submit).state.disabled = false;
+    }
+}
+
+class MyTickets: Reactor.Component {
+    function render() {
+        return <div>
+            <div #ticket-list-container>
+                <div .ticket-list #ticket-list>
+                    <div .loading>{translate("Click to load tickets")}</div>
+                </div>
+                <div style="text-align: right; margin-top: 0.5em;">
+                    <button .button .outline #btn-refresh>{translate("Refresh")}</button>
+                </div>
+            </div>
+            <div .conversation #conversation-view>
+                <div .conv-header>
+                    <span .back #btn-back>{"< " + translate("Back")}</span>
+                    <span .title #conv-title></span>
+                </div>
+                <div .messages #conv-messages></div>
+                <div .conv-attachments #conv-attachments></div>
+                <div .reply-area>
+                    <textarea #reply-text novalue={translate("Type your reply...")} />
+                    <button .button #btn-send-reply>{translate("Send")}</button>
+                </div>
+            </div>
+        </div>;
+    }
+
+    event click $(#btn-refresh) {
+        refreshTickets();
+    }
+
+    event click $(div.ticket-row) (evt, el) {
+        var id = el.attributes["data-id"].toInteger();
+        current_ticket_id = id;
+        last_message_count = 0;
+        var title = "";
+        for (var t in tickets_data) {
+            if (t.id == id) { title = t.title || ""; break; }
+        }
+        this.$(#conv-title).text = title;
+        this.$(#ticket-list-container).style.set { display: "none" };
+        this.$(#conversation-view).attributes.addClass("active");
+        hideNotification();
+        this.loadConversation(id);
+        this.loadAttachments(id);
+        this.startPolling();
+    }
+
+    event click $(#btn-back) {
+        this.$(#conversation-view).attributes.removeClass("active");
+        this.$(#ticket-list-container).style.set { display: "block" };
+        this.stopPolling();
+        current_ticket_id = 0;
+    }
+
+    // WebSocket-driven: check reply counter every 2s
+    // The ticket portal process now has its own WS connection
+    // that increments TICKET_REPLY_COUNTER on ticket:reply events
+    function startPolling() {
+        this.stopPolling();
+        last_reply_counter = (handler.get_ticket_reply_counter() || "0").toInteger();
+        var me = this;
+        poll_timer = function() {
+            if (current_ticket_id > 0) {
+                var counter = (handler.get_ticket_reply_counter() || "0").toInteger();
+                if (counter != last_reply_counter) {
+                    last_reply_counter = counter;
+                    me.loadConversation(current_ticket_id);
+                    showNotification(translate("New reply received"));
+                }
+                self.timer(2s, poll_timer);
+            }
+        };
+        self.timer(2s, poll_timer);
+    }
+
+    function stopPolling() {
+        if (poll_timer !== null) {
+            self.timer(0, poll_timer);
+            poll_timer = null;
+        }
+        last_message_count = 0;
+    }
+
+    function loadConversation(ticket_id) {
+        var el = this.$(#conv-messages);
+        if (last_message_count == 0) {
+            el.html = "<div .loading>" + translate("Loading...") + "</div>";
+        }
+        var result = handler.get_conversation(ticket_id.toString());
+        try {
+            var messages = parseData(result);
+            if (messages && messages.length > 0) {
+                if (messages.length != last_message_count) {
+                    var html = "";
+                    for (var m in messages) {
+                        var cls = m.is_customer == 1 ? "customer" : "support";
+                        var author = m.author_name || (m.is_customer == 1 ? translate("You") : translate("Support"));
+                        var time = m.created_at || "";
+                        if (time.length > 16) time = time.substr(0, 16);
+                        html += "<div .message ." + cls + ">";
+                        html += "<div .author>" + htmlEscape(author) + "</div>";
+                        html += "<div .text>" + htmlEscape(m.message || "") + "</div>";
+                        html += "<div .time>" + htmlEscape(time) + "</div>";
+                        html += "</div>";
+                    }
+                    el.html = html;
+                    el.scrollTo(0, 100000);
+                    last_message_count = messages.length;
+                }
+            } else {
+                el.html = "<div .loading>" + translate("No messages") + "</div>";
+                last_message_count = 0;
+            }
+        } catch(e) {
+            if (last_message_count == 0) {
+                el.html = "<div .status-msg .error>" + translate("Failed to load conversation") + "</div>";
+            }
+        }
+    }
+
+    function loadAttachments(ticket_id) {
+        var el = this.$(#conv-attachments);
+        var result = handler.get_attachments(ticket_id.toString());
+        try {
+            var attachments = parseData(result);
+            if (attachments && attachments.length > 0) {
+                var html = "<label style='font-weight:600;'>" + translate("Attachments") + ":</label>";
+                for (var a in attachments) {
+                    var url = a.download_url || "";
+                    html += "<div .conv-attachment-item data-url='" + htmlEscape(url) + "'>" + htmlEscape(a.file_name || "file") + " (" + formatSize(a.file_size || 0) + ")</div>";
+                }
+                el.html = html;
+                el.style.set { display: "block" };
+            } else {
+                el.html = "";
+                el.style.set { display: "none" };
+            }
+        } catch(e) {
+            el.html = "";
+        }
+    }
+
+    event click $(div.conv-attachment-item) (evt, el) {
+        var url = el.attributes["data-url"];
+        if (url && url != "") {
+            handler.open_url(url);
+        }
+    }
+
+    event click $(#btn-send-reply) {
+        var text = this.$(#reply-text).value || "";
+        if (text.trim() == "") return;
+        this.$(#btn-send-reply).state.disabled = true;
+        var result = handler.add_reply(current_ticket_id.toString(), text);
+        try {
+            var data = parseData(result);
+            if (data && data.success) {
+                this.$(#reply-text).value = "";
+                this.loadConversation(current_ticket_id);
+            }
+        } catch(e) {}
+        this.$(#btn-send-reply).state.disabled = false;
+    }
+}
+
+function parseData(jsonStr) {
+    if (!jsonStr || jsonStr == "") return null;
+    return JSON.parse(jsonStr);
+}
+
+function htmlEscape(str) {
+    if (!str) return "";
+    str = str.toString();
+    var out = "";
+    for (var i = 0; i < str.length; i++) {
+        var ch = str.charAt(i);
+        if (ch == "&") out += "&amp;";
+        else if (ch == "<") out += "&lt;";
+        else if (ch == ">") out += "&gt;";
+        else if (ch == "\"") out += "&quot;";
+        else out += ch;
+    }
+    return out;
+}
+
+function formatSize(bytes) {
+    if (bytes < 1024) return bytes + " B";
+    if (bytes < 1024 * 1024) return (bytes / 1024).toInteger() + " KB";
+    return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+function refreshTickets() {
+    var listEl = self.$(#ticket-list);
+    if (listEl) listEl.html = "<div .loading>" + translate("Loading...") + "</div>";
+    var result = handler.get_my_tickets();
+    try {
+        var data = parseData(result);
+        if (data) {
+            tickets_data = data;
+            var el = self.$(#ticket-list);
+            if (!el) return;
+            var html = "";
+            for (var t in tickets_data) {
+                var date = t.created_at || "";
+                if (date.length > 10) date = date.substr(0, 10);
+                html += "<div .ticket-row data-id='" + t.id + "'>";
+                html += "<span .subject>" + htmlEscape(t.title || "") + "</span>";
+                html += "<span .status>" + htmlEscape(t.status || "") + "</span>";
+                html += "<span .date>" + htmlEscape(date) + "</span>";
+                html += "</div>";
+            }
+            if (html == "") {
+                html = "<div .loading>" + translate("No tickets found") + "</div>";
+            }
+            el.html = html;
+        } else {
+            if (listEl) listEl.html = "<div .loading>" + translate("No tickets found") + "</div>";
+        }
+    } catch(e) {
+        if (listEl) listEl.html = "<div .status-msg .error>" + translate("Failed to load tickets") + "</div>";
+    }
+}
+
+// Notification bar helpers
+function showNotification(msg) {
+    var bar = self.$(#notification-bar);
+    var text = self.$(#notification-text);
+    if (bar && text) {
+        text.text = msg;
+        bar.style.set { display: "flex" };
+        // Auto-hide after 8 seconds
+        if (notification_hide_timer !== null) {
+            self.timer(0, notification_hide_timer);
+        }
+        notification_hide_timer = function() {
+            hideNotification();
+        };
+        self.timer(8s, notification_hide_timer);
+    }
+}
+
+function hideNotification() {
+    var bar = self.$(#notification-bar);
+    if (bar) bar.style.set { display: "none" };
+    if (notification_hide_timer !== null) {
+        self.timer(0, notification_hide_timer);
+        notification_hide_timer = null;
+    }
+}
+
+function removeBadge() {
+    var tabMy = self.$(#tab-my);
+    if (tabMy) {
+        var badge = tabMy.$(.new-badge);
+        if (badge) badge.remove();
+    }
+}
+
+// Background watch: when WS delivers ticket:reply and user is NOT
+// viewing the conversation, show notification + badge on My Tickets tab
+var bg_reply_counter = 0;
+function startBackgroundReplyWatch() {
+    bg_reply_counter = (handler.get_ticket_reply_counter() || "0").toInteger();
+    function checkBg() {
+        var counter = (handler.get_ticket_reply_counter() || "0").toInteger();
+        if (counter != bg_reply_counter) {
+            bg_reply_counter = counter;
+            if (current_ticket_id == 0) {
+                // Not in a conversation — show badge + notification
+                has_new_reply = true;
+                var tabMy = self.$(#tab-my);
+                if (tabMy) {
+                    var badge = tabMy.$(.new-badge);
+                    if (!badge) {
+                        tabMy.$append(<span .new-badge>!</span>);
+                    }
+                }
+                showNotification(translate("You have a new reply on one of your tickets"));
+            }
+        }
+        self.timer(2s, checkBg);
+    }
+    self.timer(2s, checkBg);
+}
+
+$(#ticket-root).content(<TicketApp />);
+startBackgroundReplyWatch();

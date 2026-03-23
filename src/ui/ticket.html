@@ -1,0 +1,412 @@
+<html>
+    <head>
+        <style>
+            @import url(common.css);
+            @import url(index.css);
+
+            div.content {
+                size: *;
+                background: color(bg);
+                padding: 0.5em 1.5em 0.4em 1.5em;
+            }
+
+            div.tabs {
+                flow: horizontal;
+                border-bottom: 1px solid color(border);
+                margin-bottom: 0.5em;
+            }
+
+            div.tabs > div {
+                padding: 5px 20px;
+                cursor: pointer;
+                font-weight: 600;
+                color: color(light-text);
+                border-bottom: 2px solid transparent;
+            }
+
+            div.tabs > div.active {
+                color: color(button);
+                border-bottom: 2px solid color(button);
+            }
+
+            div.tabs > div:hover {
+                color: color(button);
+            }
+
+            div.tab-content {
+                size: *;
+            }
+
+            div.tab-panel {
+                display: none;
+            }
+
+            div.tab-panel.active {
+                display: block;
+            }
+
+            div.form-group {
+                margin-bottom: 0.4em;
+            }
+
+            div.form-group > label {
+                display: block;
+                margin-bottom: 2px;
+                font-weight: 600;
+                color: color(text);
+                font-size: 0.9em;
+            }
+
+            /* Override common.css input styles for ticket form */
+            div.content input[type="text"],
+            div.content textarea,
+            div.content select {
+                width: 100%;
+                padding: 0 8px;
+                height: 28px;
+                line-height: 28px;
+                vertical-align: middle;
+                border: 1px solid color(border);
+                border-radius: 4px;
+                background: color(bg);
+                color: color(text);
+                font-size: 0.95em;
+                box-sizing: border-box;
+            }
+
+            div.content input[type="text"]:focus,
+            div.content textarea:focus,
+            div.content select:focus {
+                border-color: color(button);
+                outline: none;
+            }
+
+            div.content input:empty {
+                color: color(placeholder);
+            }
+
+            div.content textarea {
+                height: auto;
+                min-height: 70px;
+                line-height: 1.3em;
+                padding: 6px 8px;
+                resize: none;
+                overflow-y: auto;
+            }
+
+            div.content select {
+                height: auto;
+                line-height: 1.2em;
+                padding: 5px 24px 5px 8px;
+            }
+
+            div.content select > button {
+                width: 18px;
+                margin-right: 2px;
+            }
+
+            /* Dark mode dropdown popup */
+            html.darktheme div.content select popup {
+                background: #1E293B;
+                border: 1px solid #334155;
+            }
+
+            html.darktheme div.content select option {
+                color: #E2E8F0;
+                background: #1E293B;
+            }
+
+            html.darktheme div.content select option:hover {
+                background: #334155;
+            }
+
+            html.darktheme div.content select option:current {
+                background: #2563EB;
+                color: #FFFFFF;
+            }
+
+            /* Add File button matched to select height */
+            div.content button.file-btn {
+                height: 30px;
+                border-radius: 4px;
+                border: 1px solid color(border);
+                background: transparent;
+                color: color(text);
+                padding: 0 12px;
+                font-size: 0.9em;
+                cursor: pointer;
+            }
+
+            div.content button.file-btn:hover {
+                border-color: color(hover-border);
+            }
+
+            div.form-row {
+                flow: horizontal;
+                margin-bottom: 0.4em;
+            }
+
+            div.form-row > div.form-group {
+                margin-bottom: 0;
+            }
+
+            div.form-row > div.form-group:first-child {
+                width: 40%;
+                margin-right: 1em;
+            }
+
+            div.form-row > div.form-group:last-child {
+                width: *;
+            }
+
+            div.form-actions {
+                text-align: right;
+                margin-top: 0.4em;
+                padding-top: 0.4em;
+                border-top: 1px solid color(border);
+            }
+
+            div.attachment-row {
+                flow: horizontal;
+                height: 30px;
+            }
+
+            span.file-name {
+                margin-left: 8px;
+                line-height: 30px;
+                font-size: 0.85em;
+                color: color(text);
+            }
+
+            span.file-remove {
+                cursor: pointer;
+                color: color(blood-red);
+                font-weight: bold;
+                margin-left: 6px;
+                font-size: 0.85em;
+                line-height: 30px;
+            }
+
+            /* Ticket list */
+            div.ticket-list {
+                border: 1px solid color(border);
+                border-radius: 4px;
+                overflow-y: auto;
+                max-height: 200px;
+            }
+
+            div.ticket-row {
+                flow: horizontal;
+                padding: 8px 12px;
+                border-bottom: 1px solid color(border);
+                cursor: pointer;
+            }
+
+            div.ticket-row:hover {
+                background: color(menu-hover);
+            }
+
+            div.ticket-row > span.subject {
+                width: *;
+                font-weight: 600;
+            }
+
+            div.ticket-row > span.status {
+                padding: 2px 8px;
+                border-radius: 4px;
+                font-size: 0.85em;
+                background: color(gray-bg);
+                margin-left: 8px;
+            }
+
+            div.ticket-row > span.date {
+                color: color(lighter-text);
+                font-size: 0.85em;
+                margin-left: 8px;
+                min-width: 80px;
+                text-align: right;
+            }
+
+            /* Conversation view */
+            div.conversation {
+                display: none;
+            }
+
+            div.conversation.active {
+                display: block;
+            }
+
+            div.conv-header {
+                flow: horizontal;
+                padding-bottom: 0.5em;
+                border-bottom: 1px solid color(border);
+                margin-bottom: 1em;
+            }
+
+            div.conv-header > span.back {
+                cursor: pointer;
+                color: color(button);
+                font-weight: 600;
+                margin-right: 1em;
+            }
+
+            div.conv-header > span.title {
+                width: *;
+                font-weight: 600;
+                font-size: 1.1em;
+            }
+
+            div.messages {
+                overflow-y: auto;
+                max-height: 250px;
+                margin-bottom: 1em;
+            }
+
+            div.message {
+                margin-bottom: 0.8em;
+                padding: 8px 12px;
+                border-radius: 8px;
+                max-width: 80%;
+            }
+
+            div.message.customer {
+                background: color(topbox);
+                margin-left: auto;
+            }
+
+            div.message.support {
+                background: color(gray-bg);
+                margin-right: auto;
+            }
+
+            div.message > div.author {
+                font-weight: 600;
+                font-size: 0.85em;
+                margin-bottom: 4px;
+            }
+
+            div.message > div.text {
+                white-space: pre-wrap;
+            }
+
+            div.message > div.time {
+                font-size: 0.75em;
+                color: color(lighter-text);
+                text-align: right;
+                margin-top: 4px;
+            }
+
+            div.reply-area {
+                flow: horizontal;
+            }
+
+            div.reply-area > textarea {
+                width: *;
+                min-height: 60px;
+            }
+
+            div.reply-area > button {
+                margin-left: 8px;
+                align-self: end;
+            }
+
+            div.conv-attachments {
+                margin-top: 0.5em;
+                padding-top: 0.5em;
+                border-top: 1px solid color(border);
+            }
+
+            div.conv-attachment-item {
+                padding: 4px 8px;
+                margin: 2px 0;
+                background: color(gray-bg);
+                border-radius: 4px;
+                cursor: pointer;
+                color: color(button);
+            }
+
+            div.conv-attachment-item:hover {
+                text-decoration: underline;
+            }
+
+            div.status-msg {
+                padding: 5px;
+                margin: 0.2em 0;
+                border-radius: 4px;
+                text-align: center;
+                font-size: 0.85em;
+            }
+
+            div.status-msg.success {
+                background: color(light-green);
+                color: #333;
+            }
+
+            div.status-msg.error {
+                background: #fdd;
+                color: color(blood-red);
+            }
+
+            div.loading {
+                text-align: center;
+                padding: 2em;
+                color: color(lighter-text);
+            }
+
+            /* Notification bar */
+            #notification-bar {
+                flow: horizontal;
+                padding: 8px 12px;
+                background: #007BFF;
+                color: #fff;
+                border-radius: 4px;
+                margin-bottom: 0.5em;
+                font-weight: 600;
+                font-size: 0.9em;
+            }
+
+            #notification-bar > #notification-text {
+                width: *;
+            }
+
+            #notification-bar > #notification-dismiss {
+                cursor: pointer;
+                font-weight: bold;
+                padding-left: 8px;
+            }
+
+            #notification-bar > #notification-dismiss:hover {
+                opacity: 0.7;
+            }
+
+            /* New reply badge on My Tickets tab */
+            span.new-badge {
+                display: inline-block;
+                background: #FF4444;
+                color: #fff;
+                border-radius: 50%;
+                width: 16px;
+                height: 16px;
+                line-height: 16px;
+                text-align: center;
+                font-size: 0.7em;
+                font-weight: bold;
+                margin-left: 4px;
+                vertical-align: top;
+            }
+
+            html.darktheme #notification-bar {
+                background: #2563EB;
+            }
+        </style>
+        <script type="text/tiscript">
+            include "common.tis";
+            include "msgbox.tis";
+            include "ticket.tis";
+        </script>
+    </head>
+    <body>
+        <div #ticket-root style="size: *;" />
+        <div #msgbox />
+    </body>
+</html>

@@ -1,0 +1,13 @@
+[package]
+name = "privacyhelper"
+version = "0.1.2"
+edition = "2021"
+
+[dependencies]
+sha2 = "0.10"
+winapi = { version = "0.3", features = ["memoryapi", "libloaderapi", "processthreadsapi", "psapi", "winbase", "errhandlingapi", "synchapi", "handleapi"] }
+
+#[target.'cfg(target_os="windows")'.build-dependencies]
+#static_vcruntime = "2.0"
+
+

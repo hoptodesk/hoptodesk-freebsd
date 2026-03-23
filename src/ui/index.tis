@@ -1,0 +1,1835 @@
+if (is_osx) view.windowBlurbehind = #light;
+//stdout.println("current platform:", OS);
+//stdout.println("is_xfce: ", is_xfce);
+				
+// html min-width, min-height not working on mac, below works for all
+// Use raw pixels (not scaled) so high-DPI screens can still snap to small sizes
+view.windowMinSize = (340, 280);
+view.windowMaxSize = (scaleIt(3840), scaleIt(2400));
+
+function setQS() {
+	var isquicksupport = handler.get_option('quicksupport') || handler.running_qs();
+	if (isquicksupport) {
+		var pixelsPerInch = self.toPixels(1in);
+		if (pixelsPerInch >= 120) {
+			view.windowMinSize = (scaleIt(200), scaleIt(350));
+		} else {
+			view.windowMinSize = (scaleIt(250), scaleIt(300));
+		}
+		
+		view.windowResizable = false;
+		view.windowMaximizable = false;
+		
+		if (view.windowState === View.WINDOW_MAXIMIZED) {
+			view.windowState = View.WINDOW_SHOWN;
+		}		
+	}
+}
+
+setQS();
+
+var app;
+var tmp = handler.get_connect_status();
+var connect_status = tmp[0];
+var service_stopped = handler.get_option("stop-service") == "Y";
+var software_update_url = "";
+var key_confirmed = tmp[1];
+var system_error = "";
+var showingupdate = "";
+var settingsPanelOpen = false;
+var passwordSettingsOpen = false;
+
+var svg_menu = <svg #menu title={translate('Menu')} tabindex="0" viewBox="0 0 512 512">
+	<circle cx="256" cy="256" r="64"/>
+	<circle cx="256" cy="448" r="64"/>
+	<circle cx="256" cy="64" r="64"/>
+</svg>;
+var svg_alert = <svg width="24" height="24" viewBox="0 0 24 24" stroke-width="2" stroke="currentColor" fill="none" stroke-linecap="round" stroke-linejoin="round"><path stroke="none" d="M0 0h24v24H0z" fill="none"/><path d="M12 1.67c.955 0 1.845 .467 2.39 1.247l.105 .16l8.114 13.548a2.914 2.914 0 0 1 -2.307 4.363l-.195 .008h-16.225a2.914 2.914 0 0 1 -2.582 -4.2l.099 -.185l8.11 -13.538a2.914 2.914 0 0 1 2.491 -1.403zm.01 13.33l-.127 .007a1 1 0 0 0 0 1.986l.117 .007l.127 -.007a1 1 0 0 0 0 -1.986l-.117 -.007zm-.01 -7a1 1 0 0 0 -.993 .883l-.007 .117v4l.007 .117a1 1 0 0 0 1.986 0l.007 -.117v-4l-.007 -.117a1 1 0 0 0 -.993 -.883z" stroke-width="0" fill="currentColor" /></svg>;
+
+var my_id = "";
+function get_id() {
+  my_id = handler.get_id();
+  return my_id;
+}
+
+class ConnectStatus: Reactor.Component {
+    function render() {
+        return
+            <div .connect-status #statusfooter>
+                <span class={"connect-status-icon connect-status" + (service_stopped ? 0 : connect_status)} />
+                {this.getConnectStatusStr()}
+                {service_stopped ? <span .link #start-service>{translate('Enable Incoming Connections')}</span> : ""}
+            </div>;
+    }
+
+    function getConnectStatusStr() {
+		if (service_stopped) {
+            return translate("Incoming Connections Off.");
+        } else if (connect_status == -1) {
+            return translate('not_ready_status');
+        } else if (connect_status == 0) {
+            return translate('connecting_status');
+        }
+        return translate("Ready");
+    }
+
+    event click $(#start-service) () {
+        handler.set_option("stop-service", "");
+    }
+	
+    event click $(#statusfooter) () {
+		tmp = handler.get_connect_status();
+		if (tmp[0] == 0) {
+			handler.set_version_sync();
+			stdout.println("Reloading API");
+
+		}		
+    }	
+}
+
+function createNewConnect(id, type) {
+    id = id.replace(/\s/g, "");
+    app.remote_id.value = formatId(id);
+    if (!id) return;
+    var force_relay = false; 
+    if (id == my_id) {
+        msgbox("custom-error", "Error", "You cannot connect to your own computer");
+        return;
+    }
+    handler.set_remote_id(id);
+    handler.new_remote(id, type, force_relay);
+	app.update();
+}
+
+class ShareRdp: Reactor.Component {
+    function render() {
+        var rdp_shared_string = translate("Enable RDP session sharing");
+        var cls = handler.is_share_rdp()  ? "selected" : "line-through";
+        return <li class={cls}><span>{svg_checkmark}</span>{rdp_shared_string}</li>;
+    }
+
+    function onClick() {
+        handler.set_share_rdp(!handler.is_share_rdp());
+        this.update();
+    }
+}
+
+var direct_server;
+class DirectServer: Reactor.Component {
+    function this() {
+        direct_server = this;
+    }
+
+    function render() {
+        var text = translate("Enable Direct IP Access");
+        var enabled = handler.get_option("direct-server") == "Y";
+        var cls = enabled ? "selected" : "line-through";
+        return <li class={cls} title={translate(text)}><span>{svg_checkmark}</span>{text}{enabled && <EditDirectAccessPort />}</li>;
+    }
+
+    function onClick() {
+        if (is_edit_rdp_port) {
+            is_edit_rdp_port = false;
+            return;
+        }
+        handler.set_option("direct-server", handler.get_option("direct-server") == "Y" ? "" : "Y");
+        this.update();
+    }
+}
+
+var myIdMenu;
+var audioInputMenu;
+class AudioInputs: Reactor.Component {
+    function this() {
+        audioInputMenu = this;
+    }
+
+    function render() {
+        var inputs = handler.get_sound_inputs();
+        if (is_win) inputs = ["System Sound"].concat(inputs);
+        if (!inputs.length) return <li style="display:hidden" />;
+        var me = this;
+        self.timer(1ms, function() { me.toggleMenuState() });
+        return <li>{translate('Audio Input')}
+            <menu #audio-input key={inputs.length}>
+                <li #enable-audio><span>{svg_checkmark}</span>{translate("Mute")}</li>
+                <div .separator />
+                {inputs.map(function(name) {
+                return <li id={name}><span>{svg_checkmark}</span>{translate(name)}</li>;
+                })}
+            </menu>
+        </li>;
+    }
+
+    function get_default() {
+        if (is_win) return "System Sound";
+        return "";
+    }
+
+    function get_value() {
+        return handler.get_option("audio-input") || this.get_default();
+    }
+
+    function toggleMenuState() {
+        var el = this.$(li#enable-audio);
+        var enabled = handler.get_option(el.id) != "N";
+        el.attributes.toggleClass("selected", !enabled);
+        var v = this.get_value();
+        for (var el in this.$$(menu#audio-input>li)) {
+            if (el.id == 'enable-audio') continue;
+            var selected = el.id == v;
+            el.attributes.toggleClass("selected", selected);
+        }
+    }
+
+    event click $(menu#audio-input>li) (_, me) {
+        var v = me.id;
+        if (v == 'enable-audio') {
+            handler.set_option(v, handler.get_option(v) != 'N' ? 'N' : '');
+        } else {
+          if (v == this.get_value()) return;
+          if (v == this.get_default()) v = "";
+          handler.set_option("audio-input", v);
+        }
+        this.toggleMenuState();
+    }
+};
+
+class Languages: Reactor.Component {
+    function render() {
+        var langs = JSON.parse(handler.get_langs());
+		var cur = handler.get_local_option("lang") || "default";
+		var noneng;
+        var me = this;
+        self.timer(1ms, function() { me.toggleMenuState() });
+		if (cur != "en" && cur != "default") {
+			noneng = " " + "(Language)";
+		}
+				
+        return <li>{translate('Language')} {noneng}
+            <menu #languages key={langs.length}>
+                {langs.map(function(lang) {
+                return <li id={lang[0]} title={lang[1]}><span>{svg_checkmark}</span>{lang[1]}</li>;
+                })}
+            </menu>
+        </li>;
+    }
+
+
+    function toggleMenuState() {
+        var cur = handler.get_local_option("lang") || "default";
+        for (var el in this.$$(menu#languages>li)) {
+            var selected = cur == el.id;
+            el.attributes.toggleClass("selected", selected);
+        }
+    }
+
+    event click $(menu#languages>li) (_, me) {
+        var v = me.id;
+        if (v == "default") v = "";
+        handler.set_local_option("lang", v);
+        app.update();
+        this.toggleMenuState();
+    }
+}
+
+var enhancementsMenu;
+class Enhancements: Reactor.Component {
+    function this() {
+        enhancementsMenu = this;
+    }
+
+    function render() {
+        var support_remove_wallpaper = handler.support_remove_wallpaper();
+        var me = this;
+        self.timer(1ms, function() { me.toggleMenuState() });
+        return <li>{translate('Enhancements')}
+            <menu #enhancements-menu>
+                <li #enable-abr><span>{svg_checkmark}</span>{translate("Adaptive Bitrate")} (beta)</li>
+                <li #screen-recording>{translate("Recording")}</li>
+                {support_remove_wallpaper ? <li #allow-remove-wallpaper><span>{svg_checkmark}</span>{translate("Remove wallpaper during incoming sessions")}</li> : ""}
+            </menu>
+        </li>;
+    }
+
+    function toggleMenuState() {
+        for (var el in $$(menu#enhancements-menu>li)) {
+            if (el.id && el.id.indexOf("enable-") == 0) {
+                var enabled = handler.get_option(el.id) != "N";
+                el.attributes.toggleClass("selected", enabled);
+            } else if (el.id && el.id.indexOf("allow-") == 0) {
+                var enabled = handler.get_option(el.id) == "Y";
+                el.attributes.toggleClass("selected", enabled);
+            }
+        }
+
+    }
+
+    event click $(menu#enhancements-menu>li) (_, me) {
+        var v = me.id;
+        if (v.indexOf("enable-") == 0) {
+            handler.set_option(v, handler.get_option(v) != 'N' ? 'N' : '');
+        } else if (v.indexOf("allow-") == 0) {
+            handler.set_option(v, handler.get_option(v) == 'Y' ? '' : 'Y');
+        } else if (v == 'screen-recording') {
+            var show_root_dir = is_win && handler.is_installed();
+            var user_dir = handler.video_save_directory(false);
+            var root_dir = show_root_dir ? handler.video_save_directory(true) : "";
+            var ts0 = handler.get_option("enable-record-session") == '' ? { checked: true } : {};
+            var ts1 = handler.get_option("allow-auto-record-incoming") == 'Y' ? { checked: true } : {};
+            msgbox("custom-recording", translate('Recording'),
+                <div .form>
+                    <div><button|checkbox(enable_record_session) {ts0}>{translate('Enable recording session')}</button></div>
+                    <div><button|checkbox(auto_record_incoming) {ts1}>{translate('Automatically record incoming sessions')}</button></div>
+                    <div>
+                        {show_root_dir ? <div style="word-wrap:break-word"><span>{translate("Incoming")}:&nbsp;&nbsp;</span><span>{root_dir}</span></div> : ""}
+                        <div style="word-wrap:break-word"><span>{translate(show_root_dir ? "Outgoing" : "Directory")}:&nbsp;&nbsp;</span><span #folderPath>{user_dir}</span></div>
+                        <div> <button #select_directory .link>{translate('Change')}</button> </div>
+                    </div>
+                </div>
+                , "", function(res=null) {
+                if (!res) return;
+                handler.set_option("enable-record-session", res.enable_record_session ? '' : 'N');
+                handler.set_option("allow-auto-record-incoming", res.auto_record_incoming ? 'Y' : '');
+                handler.set_option("video-save-directory", $(#folderPath).text);
+            });
+        }
+        this.toggleMenuState();
+    }
+}
+
+function getUserName() {
+    try {
+        return JSON.parse(handler.get_local_option("user_info")).name;
+    } catch(e) {}
+    return '';
+}
+
+function updateTheme() {
+    var root_element = self;
+    if (handler.get_option("allow-darktheme") == "Y") {
+        // enable dark theme
+        root_element.attributes.toggleClass("darktheme", true);
+    } else {
+        // disable dark theme
+        root_element.attributes.toggleClass("darktheme", false);
+    }
+}
+
+class MyIdMenu: Reactor.Component {
+    function this() {
+        myIdMenu = this;
+    }
+
+    function render() {
+        return <div #myid style={is_osx ? "overflow:hidden;height:0px;" : "display:none;"}>
+            {this.renderPop()}
+            {svg_menu}
+        </div>;
+    }
+
+    function renderPop() {
+        var menu = <menu.context #config-options title={translate('Menu')}>
+                <li #enable-keyboard tabindex="0"><span>{svg_checkmark}</span>{translate('Enable Keyboard/Mouse')}</li>
+                <li #enable-clipboard title={translate('Enable Clipboard')}><span>{svg_checkmark}</span>{translate('Enable Clipboard')}</li>
+                <li #enable-file-transfer title={translate('Enable File Transfer')}><span>{svg_checkmark}</span>{translate('Enable File Transfer')}</li>
+                <li #enable-remote-restart title={translate('Enable Remote Restart')}><span>{svg_checkmark}</span>{translate('Enable Remote Restart')}</li>
+                <li #enable-tunnel title={translate('Enable TCP Tunneling')}><span>{svg_checkmark}</span>{translate('Enable TCP Tunneling')}</li>
+                <li #enable-lan-discovery title={translate('Enable LAN Discovery')}><span>{svg_checkmark}</span>{translate('Enable LAN Discovery')}</li>
+                <AudioInputs />
+                <div .separator />
+                <li #custom-api-url title={translate('Choose Network')}>{translate('Choose Network')}</li>
+                <li #whitelist style="display:none" title={translate('whitelist_tip')}>{translate('IP Whitelisting')}</li>
+                <li #socks5-server title={translate('SOCKS5 Proxy')}>{translate('SOCKS5 Proxy')}</li>
+                <div .separator />
+				<li #enable-remote-printing style="display:none" title={translate('Enable Remote Printing')}><span>{svg_checkmark}</span>{translate("Enable Remote Printing")}</li>
+				<li #enable-wol title={translate('Enable Wake On LAN')}><span>{svg_checkmark}</span>{translate("Enable Wake On LAN")}</li>
+                <li #stop-service title={translate('Allow Incoming Connections')} class={service_stopped ? "line-through" : "selected"}><span>{svg_checkmark}</span>{translate("Allow Incoming Connections")}</li>
+                <li #tfa title={translate('enable-2fa-title')} class={!handler.has_valid_2fa() ? "" : "selected"}><span>{svg_checkmark}</span>{translate('enable-2fa-title')}</li>
+                <DirectServer />
+                <div .separator />
+                <li #allow-darktheme><span>{svg_checkmark}</span>{translate('Dark Theme')}</li>
+                <Languages />
+                <li #about title={translate('About')}>{translate('About')} {" "} {handler.get_app_name()}</li>
+            </menu>;
+        return menu;
+    }
+
+    event click $(svg#menu) (_, me) {
+        this.showSettingMenu();
+    }
+
+    event click $(svg#settings-gear) (_, me) {
+        this.showSettingMenu();
+    }
+    
+	event keypress $(svg#menu) (evt)
+	{
+		var scanCode = evt.keyCode;
+		for(var (name,code) in Event) {
+		  if( typeof code == #integer && (code == 13 || code == 32)) {
+				this.showSettingMenu();
+				this.$(svg#menu).focus();
+		  }
+		}
+	}
+	
+	event focusout $(svg#menu) (evt)
+	{
+		this.toggleMenuState();
+	}	
+
+    function showSettingMenu() {
+        showSettingsPanel();
+    }
+/*
+    event click $(li#login) () {
+        login();
+    }
+
+    event click $(li#logout) () {
+        logout();
+    }
+*/
+
+    function toggleMenuState() {
+		for (var el in $$(menu#config-options>li)) {
+			if (el.id && el.id.indexOf("enable-") == 0) {
+				// Remote printing defaults to OFF (must be explicitly "Y" to enable)
+				var enabled;
+				if (el.id == "enable-remote-printing") {
+					enabled = handler.get_option(el.id) == "Y";
+				} else {
+					enabled = handler.get_option(el.id) != "N";
+				}
+                if (enabled) {
+					el.attributes["title"] = translate(el.value) + " " + "(On)";
+				} else {
+					el.attributes["title"] = translate(el.value) + " " + "(Off)";
+				}
+
+				el.attributes.toggleClass("selected", enabled);
+                el.attributes.toggleClass("line-through", !enabled);
+            } else if (el.id && el.id === "stop-service") {
+                el.attributes.toggleClass("selected", !service_stopped);
+                el.attributes.toggleClass("line-through", service_stopped);
+            }
+        }
+    }
+
+    function showGen2FA() {
+        var me = this;
+        var has_valid_2fa = handler.has_valid_2fa();
+        if (has_valid_2fa) {
+			handler.set_option('2fa', '');
+            me.update();
+        } else {
+            var new2fa = handler.generate2fa();
+            var src = handler.generate_2fa_img_src(new2fa);
+            msgbox("custom-2fa-setting", translate('enter-2fa-setup'),
+                <div .form>
+                    <div>{translate('enable-2fa-desc')}</div>
+                    <center><img title='QR' style='height:160px; width:160px' src={src} /></center>
+					<div>{translate('enable-2fa-desc-verify')}</div>
+                    <center><div .code><input name='code' type='text' maxlength='6' style='width:150px; font-family: \"Courier New\"' .outline-focus /></div></center>
+					<div #wrongalert style='float:left; display:none; margin-right: 10px'>{svg_alert}</div><div #wrongcode style='font-size: 11px; font-weight: 300; display:none; '>{translate('wrong-2fa-code')}</div>
+                </div>
+                , "", function(res=null) {
+				if (!res) return;
+                if (!res.code) return;
+                if (!handler.verify2fa(res.code)) {
+					var el = $(#wrongcode);
+					el.style.set{display: "block"};
+					var elalert = $(#wrongalert);
+					elalert.style.set{display: "block"};					
+					return <div></div>;
+                } else {
+					msgbox("custom", translate("Success"), translate("2FA setup successfully."));
+				}
+                me.update();
+            }, 470);
+        }
+        
+    }
+    
+    function showAbout() {
+        var name = handler.get_app_name();
+            msgbox("custom-nocancel-nook-hasclose", translate('About') + " " + name, "<div style='line-height: 2em'> \
+                <div>Version: " + handler.get_version() + " \
+                <div>TeamID: " + handler.get_teamid() + " \
+            </div>
+			<div style='font-size: 13px; color: #000; text-decoration: none;'>
+				<div .link .custom-event url='https://www.hoptodesk.com'>Website</div> \
+				<div .link .custom-event url='https://www.hoptodesk.com/privacy'>Privacy Statement</div> \
+			<br><br>
+			<div .link .custom-event url='https://www.gnu.org/licenses/agpl-3.0.en.html'><span style='text-decoration: none'>This software is licensed under&nbsp;</span>AGPL 3.0</div> \
+			<div .link .custom-event url='https://gitlab.com/hoptodesk/hoptodesk/'><span style='text-decoration: none'>Source code is available&nbsp;</span>here</div><br>
+			</div><br>
+			<div style='font-size: 9px; color: #888; text-decoration: none;' .link .custom-event url='http://sciter.com/'>This Application (or Component) uses Sciter Engine, copyright Terra Informatica Software, Inc.</div>
+			<div style='font-size: 9px; color: #888; text-decoration: none;'>Copyright &copy; HopToDesk. Originally forked from RustDesk.</div>			\
+			", "", function(el) {
+                if (el && el.attributes) {
+                    handler.open_url(el.attributes['url']);
+                };
+            }, 400);
+    }
+	
+    function showUpdatePopup() {
+			var isquicksupport = handler.get_option('quicksupport') || handler.running_qs();
+			if (isquicksupport) {
+				return;
+			}
+			let dontshowbox;
+			showingupdate = "1";
+			dontshowbox = ".checkboxunchecked";
+			
+            msgbox("custom-nocancel-nook-hasyes-hasno", translate('Update Available'), " \
+			<center><svg xmlns='http://www.w3.org/2000/svg' width='64' height='64' viewBox='0 0 500 500' version='1.1'><path d='M 245.110 155.396 C 240.061 158.194, 240.073 158.055, 240.035 210.489 C 240 259.477, 240 259.477, 223.750 243.376 C 214.813 234.520, 206.387 226.538, 205.027 225.637 C 201.480 223.288, 197.611 223.615, 194.111 226.560 C 189.994 230.024, 189.125 234.855, 191.835 239.213 C 192.959 241.021, 205.529 254.088, 219.770 268.250 C 245.643 293.983, 245.664 294, 250 294 C 254.336 294, 254.357 293.983, 280.230 268.250 C 294.471 254.088, 307.041 241.021, 308.165 239.213 C 310.875 234.855, 310.006 230.024, 305.889 226.560 C 302.389 223.615, 298.520 223.288, 294.973 225.637 C 293.613 226.538, 285.188 234.520, 276.250 243.376 C 260 259.477, 260 259.477, 260 210.786 C 260 175.165, 259.679 161.390, 258.805 159.472 C 256.616 154.666, 249.986 152.693, 245.110 155.396 M 163.329 287.471 C 159.858 290.942, 159.858 290.942, 160.179 306.298 C 160.489 321.111, 160.607 321.864, 163.518 327.549 C 165.564 331.545, 168.140 334.658, 171.518 337.218 C 180.864 344.299, 178.112 344.073, 251.572 343.771 C 317.500 343.500, 317.500 343.500, 322.484 341.047 C 329.324 337.682, 335.444 331.103, 337.939 324.433 C 339.661 319.830, 340 316.615, 340 304.862 C 340 290.800, 340 290.800, 336.600 287.400 C 332.220 283.020, 328.296 282.871, 323.766 286.915 C 320.500 289.829, 320.500 289.829, 320 303.894 C 319.227 325.644, 326.893 323.500, 249.895 323.500 C 185.836 323.500, 185.836 323.500, 182.918 320.234 C 180.009 316.979, 180 316.928, 180 303.884 C 180 290.800, 180 290.800, 176.600 287.400 C 171.962 282.762, 168.017 282.783, 163.329 287.471' stroke='none' fill='#fbfbfc' fill-rule='evenodd'/><path d='M 231 41.508 C 214.372 45.563, 198.875 55.787, 163.502 86.041 C 154.151 94.039, 135.925 109.383, 123 120.140 C 87.615 149.590, 73.550 164.194, 64.128 181.272 C 48.452 209.683, 48.679 248.787, 64.794 296 C 79.796 339.955, 101.438 374.993, 129.572 400.873 C 159.582 428.480, 196.679 444.080, 232.500 444.158 C 263.964 444.226, 288.488 434.355, 335.864 402.552 C 395.603 362.451, 411.631 349.864, 428.146 330.080 C 447.857 306.468, 455.853 282.928, 454.670 252 C 454.052 235.869, 452.113 226.019, 447.088 213.500 C 437.050 188.489, 424.093 175.172, 376.004 140.441 C 352.185 123.238, 344.463 116.565, 315.993 88.576 C 301.964 74.784, 286.702 60.479, 282.077 56.786 C 263.580 42.020, 248.005 37.361, 231 41.508 M 245.110 155.396 C 240.061 158.194, 240.073 158.055, 240.035 210.489 C 240 259.477, 240 259.477, 223.750 243.376 C 214.813 234.520, 206.387 226.538, 205.027 225.637 C 201.480 223.288, 197.611 223.615, 194.111 226.560 C 189.994 230.024, 189.125 234.855, 191.835 239.213 C 192.959 241.021, 205.529 254.088, 219.770 268.250 C 245.643 293.983, 245.664 294, 250 294 C 254.336 294, 254.357 293.983, 280.230 268.250 C 294.471 254.088, 307.041 241.021, 308.165 239.213 C 310.875 234.855, 310.006 230.024, 305.889 226.560 C 302.389 223.615, 298.520 223.288, 294.973 225.637 C 293.613 226.538, 285.188 234.520, 276.250 243.376 C 260 259.477, 260 259.477, 260 210.786 C 260 175.165, 259.679 161.390, 258.805 159.472 C 256.616 154.666, 249.986 152.693, 245.110 155.396 M 163.329 287.471 C 159.858 290.942, 159.858 290.942, 160.179 306.298 C 160.489 321.111, 160.607 321.864, 163.518 327.549 C 165.564 331.545, 168.140 334.658, 171.518 337.218 C 180.864 344.299, 178.112 344.073, 251.572 343.771 C 317.500 343.500, 317.500 343.500, 322.484 341.047 C 329.324 337.682, 335.444 331.103, 337.939 324.433 C 339.661 319.830, 340 316.615, 340 304.862 C 340 290.800, 340 290.800, 336.600 287.400 C 332.220 283.020, 328.296 282.871, 323.766 286.915 C 320.500 289.829, 320.500 289.829, 320 303.894 C 319.227 325.644, 326.893 323.500, 249.895 323.500 C 185.836 323.500, 185.836 323.500, 182.918 320.234 C 180.009 316.979, 180 316.928, 180 303.884 C 180 290.800, 180 290.800, 176.600 287.400 C 171.962 282.762, 168.017 282.783, 163.329 287.471' stroke='none' fill='#bce4fc' fill-rule='evenodd'/></svg></center><br></br> \
+			<span style=\"margin-top: 5px; margin-bottom: 15px;\">" + translate("An update is available, do you want to update to the new version?") + "</span><br></br> \
+				<div style=\"margin-top: 30px; display: flex; align-items: center; \"> \
+					<div id='dontshowagain' .custom-event style=\"float:left; width: 20px; height: 20px; border: 4px solid #2196F3; border-radius: 8px; cursor: pointer;\"> \
+						<div id='dontshowagainchecked'></div> \
+					</div> \
+					<div style=\"height:32px; vertical-align: middle; \"><div style=\"margin-left: 40px; display:block; \">" + translate("Don't show this again.") + "</div></div> \
+				</div> \
+			<br></br> \
+			", "", function(el) {
+				if (el) {
+					if (el.type === "custom-nocancel-nook-hasyes-hasno"){
+						if ($(#dontshowagainchecked).attributes.hasClass("checkboxunchecked")) {
+							showingupdate = "";
+						}
+										
+						view.windowState = View.WINDOW_MINIMIZED;
+						handler.run_temp_update();
+						
+						if ($(#dontshowagainchecked).attributes.hasClass("checkboxchecked")) {
+							showingupdate = "";
+						}				
+						
+						return;						
+					}
+					if (el.id === 'dontshowagain') {
+						if ($(#dontshowagain).attributes.hasClass("checkedtrue")) {
+							$(#dontshowagain).attributes.removeClass("checkedtrue");
+							$(#dontshowagain).html = '';
+							handler.set_local_option("dontshowagain", "");
+						} else {
+							$(#dontshowagain).html = '<div id="dontshowagainchecked" style="margin-top: -7px; margin-left: 2px;  font-weight: 900; font-size: 25px; color: #2196F3; cursor: pointer; ">&#10003;</div>';
+							$(#dontshowagain).attributes.addClass("checkedtrue");
+							handler.set_local_option("dontshowagain", "1");
+						}
+					}
+                } {
+					showingupdate = "";
+				}
+				
+            }, 240);
+    }	
+
+    function handleMenuClick(me) {
+        if (me.id && me.id.indexOf("enable-") == 0) {
+            handler.set_option(me.id, handler.get_option(me.id) == "N" ? "" : "N");
+        }
+        if (me.id && me.id.indexOf("allow-") == 0) {
+            handler.set_option(me.id, handler.get_option(me.id) == "Y" ? "" : "Y");
+        }
+        if (me.id == "whitelist") {
+            var old_value = handler.get_option("whitelist").split(",").join("\n");
+            msgbox("custom-whitelist", translate("IP Whitelisting"), "<div .form> \
+            <div>" + translate("whitelist_sep") + "</div> \
+            <textarea spellcheck=\"false\" name=\"text\" novalue=\"0.0.0.0\" style=\"overflow: scroll-indicator; width:*; height: 140px; font-size: 1.2em; padding: 0.5em; margin-bottom: 10px; \">" + old_value + "</textarea>\
+            </div> \
+            ", "", function(res=null) {
+                if (!res) return;
+				var value = (res.text || "").trim();
+                if (value) {
+                    var values = value.split(/[\s,;\n]+/g);
+                    for (var ip in values) {
+                        if (!ip.match(/^(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)\.(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]?|0)(\/([1-9]|[1-2][0-9]|3[0-2])){0,1}$/)
+                            && !ip.match(/^(((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*::((?:[0-9A-Fa-f]{1,4}))*((?::[0-9A-Fa-f]{1,4}))*|((?:[0-9A-Fa-f]{1,4}))((?::[0-9A-Fa-f]{1,4})){7})(\/([1-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])){0,1}$/)) {
+                            return translate("Invalid IP") + ": " + ip;
+                        }
+                    }
+                    value = values.join("\n");
+                }
+                if (value == old_value) return;
+                stdout.println("whitelist updated");
+                handler.set_option("whitelist", value.replace("\n", ","));
+            }, 300);
+        } else if (me.id == "custom-api-url") {
+            let old_url = handler.get_custom_api_url();
+			let uncheckedimg;
+			let selectedhopnetwork;
+			let selectedcustomnetwork;
+			if (old_url) {selectedhopnetwork = ".uncheckednetwork"; selectedcustomnetwork = ".checkednetwork";} else {selectedhopnetwork = ".checkednetwork"; selectedcustomnetwork = ".uncheckednetwork";}
+			
+            msgbox("custom", translate('Choose Network'), "<div .form> \
+            <div> \
+			<div #networkdefault .custom-event title='HopToDesk Network' " + selectedhopnetwork + " network='networkdefault' style=\"height: 30px; display:block;\"><div style=\"padding-top: 1px; margin-top: 5px; margin-left: 35px; display: block;\">" + translate("HopToDesk Network (Default)") + "</div></div><br></br> \
+			<div #networkcustom .custom-event title='Custom Network Settings' " + selectedcustomnetwork + " network='networkcustom' id='networkcustom' style=\"height: 30px; display:block;\"><div style=\"padding-top: 1px; margin-top: 5px; margin-left: 35px; display: block;\">" + translate("Custom Network Settings") + "</div></div><br></br> \
+			<span style=\"margin-top: 5px; margin-bottom: 15px;\">" + translate("Enter your custom network settings URL:") + "</span><br></br><br></br> \
+			<input|text .outline-focus name='url' value='" + old_url + "' placeholder='" + translate('Custom network settings URL') + "' style=\"margin-bottom: 15px; max-width: 100%; font-size: 14px\" #customurl/></div> \
+            </div> \
+			", "", function(el) {
+				if (el) {
+					if (el.id !== 'networkcustom' && el.id !== 'networkdefault' ) {
+						let resurl = $(#customurl).value;
+						if (!resurl) {handler.set_custom_api_url('');return;};
+								
+						if (old_url != resurl) {
+							let valid_url = () => {
+								handler.set_custom_api_url(resurl);
+							}
+							if (resurl == "") return valid_url();
+
+							httpGetRequest(resurl, #get, {}, function(data) {
+								if (data.error) {
+									msgbox("custom-error", translate("Custom Network Error"), translate("The custom network URL provided was not valid, please try again.") + "<br/>" + data.error, () => {});
+									return;
+								}
+
+								let jsontemp = JSON.stringify(data);
+								let text_res = jsontemp.toString();
+								let json;
+								try {
+									json = JSON.parse(text_res);
+								} catch (e) {
+									return msgbox("custom-error", translate("Custom Network Error"), translate("The custom network URL provided was not valid, please try again.") + "<br/>" + text_res , () => {});
+								}
+								
+								let rendezvous = data.rendezvous || data.rendezvousssl;
+								if (data instanceof Object && data.turnservers && rendezvous) {
+									let host = rendezvous.host;
+									let port = rendezvous.port.toInteger();
+									if (port == undefined || port < 0 || port > 65536) return msgbox("custom-error", translate("Custom Network Error"), "Port `" + rendezvous.port + "` is an invalid port.");
+									valid_url();
+								} else msgbox("custom-error", translate("Custom Network Error"), "The custom network URL provided did not return a correct response: (`" + text_res + "`).");
+							}, function(err, status) {
+								msgbox("custom-error", translate("Custom Network Error"), translate("The custom network URL provided was not valid, please try again.") + "<br/>Status " + status + ": `" + err + "`", () => {});
+							});
+						}
+					} else {
+						if (el && el.attributes['network'] === 'networkdefault') {
+							$(#customurl).value = '';
+							$(#networkdefault).attributes.addClass("checkednetwork");
+							$(#networkdefault).attributes.removeClass("uncheckednetwork");
+							$(#networkcustom).attributes.removeClass("checkednetwork");
+							$(#networkcustom).attributes.addClass("uncheckednetwork");
+						}
+						if (el && el.attributes['network'] === 'networkcustom') {
+							$(#customurl).state.focus = true;
+							$(#networkdefault).attributes.removeClass("checkednetwork");
+							$(#networkdefault).attributes.addClass("uncheckednetwork");
+							$(#networkcustom).attributes.addClass("checkednetwork");
+							$(#networkcustom).attributes.removeClass("uncheckednetwork");
+						}
+						return;
+					}
+                }
+				
+				if (!resurl) return;
+
+            }, 240)
+        } else if (me.id == "socks5-server") {
+            var socks5 = handler.get_socks() || {};
+            var old_proxy = socks5[0] || "";
+            var old_username = socks5[1] || "";
+            var old_password = socks5[2] || "";
+            msgbox("custom-server", "SOCKS5 Proxy", <div .form .set-password>
+            <div><span>{translate("Hostname")}:</span><input|text name='proxy' value={old_proxy} /></div>
+            <div><span>{translate("Username")}:</span><input|text name='username' value={old_username} /></div>
+            <div><span>{translate("Password")}:</span><PasswordComponent value={old_password} /></div>
+            </div>
+            , "", function(res=null) {
+                if (!res) return;
+				var proxy = (res.proxy || "").trim();
+                var username = (res.username || "").trim();
+                var password = (res.password || "").trim();
+                if (proxy == old_proxy && username == old_username && password == old_password) return;
+                if (proxy) {
+                    var err = handler.test_if_valid_server(proxy);
+                    if (err) return translate("Server") + ": " + err;
+                }
+                handler.set_socks(proxy, username, password);
+            }, 240);
+        } else if (me.id == "stop-service") {
+            handler.set_option("stop-service", service_stopped ? "" : "Y");
+        } else if (me.id == "allow-darktheme") {
+            updateTheme();
+        } else if (me.id == "tfa") {
+            this.showGen2FA()
+        } else if (me.id == "about") {
+            this.showAbout()
+        } else if (me.id == "enable-remote-printing") {
+            var enable_remote_printing = handler.get_option("enable-remote-printing") == "Y" ? "N" : "Y";
+            handler.set_option("enable-remote-printing", enable_remote_printing);
+        } else if (me.id == "enable-wol") {
+            var wasEnabled = handler.get_option("enable-wol") == "Y";
+            handler.set_option("enable-wol", wasEnabled ? "N" : "Y");
+            handler.set_option("wol-enabled", wasEnabled ? "" : "true");
+        }
+    }
+
+    event click $(menu#config-options>li) (_, me) {
+        this.handleMenuClick(me);
+    }
+}
+
+var is_edit_direct_access_port;
+class EditDirectAccessPort: Reactor.Component {
+    function render() {
+        return <span style="margin-left: 12px; padding: 0 6px; display: inline-block;" .link>{svg_edit}</span>;
+    }
+
+    function onMouse(evt) {
+        if (evt.type == Event.MOUSE_DOWN) {
+            is_edit_direct_access_port = true;
+            editDirectAccessPort();
+        }
+    }
+}
+
+function editDirectAccessPort() {
+    var p0 = handler.get_option('direct-access-port');
+    var port = p0 ? <input|text name='port' value={p0} /> :
+                    <input|text name='port' novalue={21118} />;
+    msgbox("custom-direct-access-port", translate('Direct IP Access'), <div .form .set-password>
+            <div><span style="width: 60px; ">{translate('Port')}:</span>{port}</div>
+        </div>, "", function(res=null) {
+        if (!res) return;
+		var p = (res.port || '').trim();
+        if (p) {
+            p = p.toInteger();
+            if (!(p > 0)) {
+                return translate("Invalid port");
+            }
+            p = p + '';
+        }
+        if (p != p0) handler.set_option('direct-access-port', p);
+      });
+}
+
+class App: Reactor.Component
+{
+    function this() {
+        app = this;
+    }
+
+    function render() {
+        var is_can_screen_recording = handler.is_can_screen_recording(false);
+		var isquicksupport = handler.get_option('quicksupport') || handler.running_qs();
+		
+        return
+            <div .app style={isquicksupport ? "width:250px" : ""}>
+                    <MyIdMenu />
+                    <div .top-bar>
+                        <div .brand-name>HopToDesk</div>
+                        {!isquicksupport && !handler.is_installed() ? <button #install-btn title={translate('install_tip')}>{translate('Install')}</button> : ""}
+                        {is_osx && !is_can_screen_recording ? <button .button #mac-enable-perms title={translate('Enable Permissions')}>{translate('Enable Permissions')}</button> : ""}
+                        {is_osx && is_can_screen_recording && !handler.is_process_trusted(false) ? <button .button #mac-enable-perms-acc title={translate('Enable Permissions')}>{translate('Enable Permissions')}</button> : ""}
+                        <div style="width: *;" />
+                        {(!isquicksupport && handler.get_option("dashboard_user_id") != "") ?
+                            <svg #ticket-icon tabindex="0" title={translate("Open support tickets")} viewBox="0 0 24 24"><path fill="currentColor" d="M22 10V6c0-1.1-.9-2-2-2H4c-1.1 0-2 .9-2 2v4c1.1 0 2 .9 2 2s-.9 2-2 2v4c0 1.1.9 2 2 2h16c1.1 0 2-.9 2-2v-4c-1.1 0-2-.9-2-2s.9-2 2-2z"/></svg>
+                            : ""
+                        }
+                        <ConnectStatus @{this.connect_status} />
+                    </div>
+                    <div .main-content>
+                        <div .cards-row>
+                            <div .card-device>
+                                <div .card-header>{translate('This Device')}<div style="width:*;" /><svg #settings-gear tabindex="0" title={translate('Settings')} viewBox="0 0 24 24"><path fill="currentColor" d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1112 8.4a3.6 3.6 0 010 7.2z"/></svg></div>
+                                <div .card-body>
+                                    <div .id-section>
+                                        <div .id-label>{translate('Your ID')}</div>
+                                        <div .id-row>
+                                            {key_confirmed ? <div #idbox .idbox readonly behavior="edit" title={translate('Your unique device ID - share this with others so they can connect to you')}>{formatId(get_id())}</div> : <div #idbox .idbox readonly behavior="edit" style="font-size: 1em; color: #2D81D4;">{translate("Generating ...")}</div>}
+                                            {key_confirmed ? <div #copy-id .copy-pill title={translate('Copy your device ID to clipboard so others can connect to you')}><svg viewBox="0 0 24 24"><path fill="currentColor" d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/></svg>Copy</div> : ""}
+                                            {key_confirmed && !isquicksupport ? <div #invite-pill .invite-pill title={translate('Send a connection invitation to another device by entering its ID')}><svg viewBox="0 0 24 24"><path fill="currentColor" d="M15 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm-9-2V7H4v3H1v2h3v3h2v-3h3v-2H6zm9 4c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/></svg>Invite</div> : ""}
+                                        </div>
+                                    </div>
+                                    <PasswordArea />
+                                </div>
+                            </div>
+                            <div .card-remote style={isquicksupport ? "display:none" : ""}>
+                                <div .card-header>{translate('Remote Control')}</div>
+                                <div .card-body>
+                                    <div .id-label>{translate('Partner ID')}</div>
+                                    <ID @{this.remote_id} />
+                                    <div .connect-buttons>
+                                        <button .button #connect title={translate('Start a remote desktop session with the partner device')}>{translate('Connect')}</button>
+                                        <button .button .outline #file-transfer title={translate('Open a file transfer session to send or receive files')}>{translate('Transfer File')}</button>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        <div .sessions-area id="right-pane" style={isquicksupport ? "display:none" : ""}>
+							<MultipleSessions @{this.multipleSessions} />
+							<center><img .footer-featured src="" /></center>
+                        </div>
+                                                    
+                        <div #launch-update style="display:none" .update_available .link url='https://www.hoptodesk.com/'>{translate('New Update Available')}</div>
+                        {!is_osx && !is_can_screen_recording ? <CanScreenRecording /> : ""}
+                        {!is_osx && is_can_screen_recording && !handler.is_process_trusted(false) ? <TrustMe /> : ""}
+                        {!service_stopped && is_can_screen_recording && handler.is_process_trusted(false) && handler.is_installed() && !handler.is_installed_daemon(false) ? <InstallDaemon /> : ""}
+                        {is_osx && !service_stopped && is_can_screen_recording && handler.is_process_trusted(false) && !handler.is_installed() && handler.is_installed_daemon(false) ? <EmptyMe />: ""}
+                        {system_error ? <SystemError /> : ""}
+                        {!system_error && handler.is_login_wayland() && !handler.current_is_wayland() ? <EmptyMe /> : ""}
+                        {!system_error && handler.current_is_wayland() ? <EmptyMe /> : ""}
+                        {is_linux && !system_error && !handler.is_login_wayland() && !handler.current_is_wayland() ? <EmptyMe />: ""}
+
+                    </div>
+                <div #overlay style="position: absolute;size:*;background:black;opacity:0.5;display:none" />
+                {settingsPanelOpen ? this.renderSettingsPanel() : ""}
+                {passwordSettingsOpen ? this.renderPasswordSettings() : ""}
+            </div>;
+    }
+
+    function renderPasswordSettings() {
+        var tempPw = password_cache[0] || handler.temporary_password() || "";
+        var pwLength = handler.get_option('temporary-password-length') || '6';
+        var pw = handler.permanent_password();
+
+        return <div style="position:absolute;left:0;top:0;size:*;z-index:100;">
+            <div #pw-settings-backdrop style="size:*;background:rgba(0,0,0,0.5);" />
+            <div .pw-modal style="position:absolute;margin:*;">
+                <div .pw-modal-header>
+                    <span .pw-modal-title>{translate('Password Settings')}</span>
+                    <div style="width:*;" />
+                    <span .pw-modal-close>&#x2715;</span>
+                </div>
+                <div .pw-modal-body>
+                    <div .pw-modal-section>
+                        <div .pw-section-title>{translate('Permanent Password')}</div>
+                        <div .pw-field-label>{translate('Password')}</div>
+                        <input|password #pw-input-password .pw-input value={pw} />
+                        <div .pw-field-label>{translate('Confirm')}</div>
+                        <input|password #pw-input-confirm .pw-input value={pw} />
+                        <div .pw-field-actions>
+                            <span #pw-set-error .pw-error />
+                            <div style="width:*;" />
+                            <button .pw-btn .pw-btn-primary #pw-save-password>{translate('Save')}</button>
+                        </div>
+                    </div>
+
+                    <div .pw-divider />
+
+                    <div .pw-modal-section>
+                        <div .pw-section-title>{translate('Random Password')}</div>
+                        <div .pw-random-row>
+                            <span #pw-random-display .pw-random-display>{tempPw}</span>
+                            <div style="width:*;" />
+                            <button .pw-btn .pw-btn-outline #pw-refresh>{translate('Refresh')}</button>
+                        </div>
+                        <div .pw-length-row>
+                            <span .pw-field-label>{translate('Length')}:</span>
+                            <div .pw-length-group>
+                                <div .pw-length-btn #pw-len-6 class={pwLength == '6' ? 'selected' : ''}>6</div>
+                                <div .pw-length-btn #pw-len-8 class={pwLength == '8' ? 'selected' : ''}>8</div>
+                                <div .pw-length-btn #pw-len-10 class={pwLength == '10' ? 'selected' : ''}>10</div>
+                            </div>
+                        </div>
+                    </div>
+
+                </div>
+            </div>
+        </div>;
+    }
+
+    // Password settings modal events
+    event click $(.pw-modal-close) {
+        passwordSettingsOpen = false;
+        app.update();
+    }
+    event click $(#pw-settings-backdrop) {
+        passwordSettingsOpen = false;
+        app.update();
+    }
+    event click $(#pw-save-password) {
+        var p0 = ($(#pw-input-password).value || "").trim();
+        var p1 = ($(#pw-input-confirm).value || "").trim();
+        var errEl = $(#pw-set-error);
+        if (p0.length < 6 && p0.length != 0) {
+            if (errEl) errEl.text = translate("Too short, at least 6 characters.");
+            return;
+        }
+        if (p0 != p1) {
+            if (errEl) errEl.text = translate("The confirmation is not identical.");
+            return;
+        }
+        handler.set_permanent_password(p0);
+        passwordSettingsOpen = false;
+        app.update();
+        passwordArea.update();
+    }
+    event click $(#pw-refresh) {
+        handler.update_temporary_password();
+        var tempPw = handler.temporary_password();
+        password_cache[0] = tempPw;
+        var el = $(#pw-random-display);
+        if (el) el.text = tempPw;
+        passwordArea.update();
+    }
+    event click $(#pw-len-6) { this.setTempPwLength('6'); }
+    event click $(#pw-len-8) { this.setTempPwLength('8'); }
+    event click $(#pw-len-10) { this.setTempPwLength('10'); }
+    function setTempPwLength(len) {
+        handler.set_option('temporary-password-length', len);
+        handler.update_temporary_password();
+        var tempPw = handler.temporary_password();
+        password_cache[0] = tempPw;
+        var el = $(#pw-random-display);
+        if (el) el.text = tempPw;
+        for (var el in $$(div.pw-length-btn)) {
+            el.attributes.toggleClass("selected", el.id == "pw-len-" + len);
+        }
+        passwordArea.update();
+    }
+
+    function renderSettingsPanel() {
+        // Auto-enable remote printing on first settings open if not explicitly set (Windows only)
+        if (is_win && handler.get_option("enable-remote-printing") == "") {
+            handler.set_option("enable-remote-printing", "Y");
+        }
+        function isEnabled(id) {
+            if (id == "enable-wol") return handler.get_option(id) == "Y";
+            if (id == "enable-remote-printing") return handler.get_option(id) == "Y";
+            if (id == "direct-server") return handler.get_option(id) == "Y";
+            return handler.get_option(id) != "N";
+        }
+        function toggleClass(enabled) { return enabled ? "toggle-on" : "toggle-off"; }
+        function toggleBg(enabled) { return "background:" + (enabled ? "#2C8CFF" : "#CBD5E1") + ";width:36px;height:20px;border-radius:10px;position:relative;cursor:pointer;display:inline-block;"; }
+        function knobStyle(enabled) { return "width:16px;height:16px;border-radius:50%;background:white;position:absolute;top:2px;left:" + (enabled ? "18px" : "2px") + ";box-shadow:0 1px 2px rgba(0,0,0,0.2);"; }
+        var darkOn = handler.get_option("allow-darktheme") == "Y";
+        var serviceOn = !service_stopped;
+        var tfaOn = handler.has_valid_2fa();
+        var langs = JSON.parse(handler.get_langs());
+        var curLang = handler.get_local_option("lang") || "default";
+        var curLangName = "English";
+        for (var lang in langs) { if (lang[0] == curLang) { curLangName = lang[1]; break; } }
+        if (curLang == "default") curLangName = "Default";
+
+        return <div style="position:absolute;left:0;top:0;size:*;z-index:99;">
+            <div #settings-backdrop style="size:*;background:rgba(0,0,0,0.3);" />
+            <div #settings-panel style="position:absolute;left:0;top:0;width:280px;height:*;z-index:1;">
+                <div .settings-header>
+                    <span .settings-title>{translate("Settings")}</span>
+                    <div style="width:*;" />
+                    <span .settings-close>&#x2715;</span>
+                </div>
+                <div .settings-body>
+                    <div .settings-section>
+                        <div .section-label>{translate("Remote Access")}</div>
+                        <div .setting-row id="toggle-enable-keyboard"><span .setting-name>{translate("Keyboard/Mouse")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-keyboard"))}><div .toggle-knob style={knobStyle(isEnabled("enable-keyboard"))} /></div></div>
+                        <div .setting-row id="toggle-enable-clipboard"><span .setting-name>{translate("Clipboard")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-clipboard"))}><div .toggle-knob style={knobStyle(isEnabled("enable-clipboard"))} /></div></div>
+                        <div .setting-row id="toggle-enable-file-transfer"><span .setting-name>{translate("File Transfer")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-file-transfer"))}><div .toggle-knob style={knobStyle(isEnabled("enable-file-transfer"))} /></div></div>
+                        <div .setting-row id="toggle-enable-remote-restart"><span .setting-name>{translate("Remote Restart")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-remote-restart"))}><div .toggle-knob style={knobStyle(isEnabled("enable-remote-restart"))} /></div></div>
+                        <div .setting-row id="toggle-enable-tunnel"><span .setting-name>{translate("TCP Tunneling")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-tunnel"))}><div .toggle-knob style={knobStyle(isEnabled("enable-tunnel"))} /></div></div>
+                        {is_win || is_osx ? <div .setting-row id="toggle-enable-remote-printing"><span .setting-name>{translate("Remote Printing")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-remote-printing"))}><div .toggle-knob style={knobStyle(isEnabled("enable-remote-printing"))} /></div></div> : ""}
+                        <div .setting-row id="toggle-enable-wol"><span .setting-name>{translate("Wake On LAN")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-wol"))}><div .toggle-knob style={knobStyle(isEnabled("enable-wol"))} /></div></div>
+                    </div>
+                    {handler.get_sound_inputs().length || is_win ? <div .settings-section>
+                        <div .section-label>{translate("Audio Input")}</div>
+                        <div .setting-row id="toggle-enable-audio"><span .setting-name>{translate("Mute")}</span><div .toggle-switch style={toggleBg(handler.get_option("enable-audio") == "N")}><div .toggle-knob style={knobStyle(handler.get_option("enable-audio") == "N")} /></div></div>
+                        <div .setting-row .setting-action id="action-audio-input"><span .setting-name>{translate("Device")}</span><span .setting-value>{(function() { var v = handler.get_option("audio-input"); if (!v) v = is_win ? "System Sound" : "Default"; return v; })()}</span></div>
+                    </div> : ""}
+                    <div .settings-section>
+                        <div .section-label>{translate("Network")}</div>
+                        <div .setting-row .setting-action id="action-custom-api-url"><span .setting-name>{translate("Choose Network")}</span><span .setting-arrow>&#x203A;</span></div>
+                        <div .setting-row .setting-action id="action-socks5-server"><span .setting-name>{translate("SOCKS5 Proxy")}</span><span .setting-arrow>&#x203A;</span></div>
+                        <div .setting-row id="toggle-direct-server"><span .setting-name>{translate("Direct IP Access")}</span><div .toggle-switch style={toggleBg(isEnabled("direct-server"))}><div .toggle-knob style={knobStyle(isEnabled("direct-server"))} /></div></div>
+                        <div .setting-row .setting-action id="action-enable-lan-discovery"><span .setting-name>{translate("LAN Discovery")}</span><div .toggle-switch style={toggleBg(isEnabled("enable-lan-discovery"))}><div .toggle-knob style={knobStyle(isEnabled("enable-lan-discovery"))} /></div></div>
+                    </div>
+                    <div .settings-section>
+                        <div .section-label>{translate("Security")}</div>
+                        <div .setting-row id="toggle-stop-service"><span .setting-name>{translate("Allow Incoming Connections")}</span><div .toggle-switch style={toggleBg(serviceOn)}><div .toggle-knob style={knobStyle(serviceOn)} /></div></div>
+                        <div .setting-row .setting-action id="action-tfa"><span .setting-name>{translate("Two-Factor Authentication")}</span><span .setting-value>{tfaOn ? "On" : "Off"}</span></div>
+                    </div>
+                    <div .settings-section>
+                        <div .section-label>{translate("Appearance")}</div>
+                        <div .setting-row id="toggle-allow-darktheme"><span .setting-name>{translate("Dark Theme")}</span><div .toggle-switch style={toggleBg(darkOn)}><div .toggle-knob style={knobStyle(darkOn)} /></div></div>
+                        <div .setting-row .setting-action id="action-language"><span .setting-name>{translate("Language")}</span><span .setting-value>{curLangName}</span></div>
+                    </div>
+                    <div .settings-section>
+                        <div .section-label>{translate("Dashboard")}</div>
+                        {handler.get_option("dashboard_user_id") != ""
+                            ? <div .setting-row .setting-action id="action-dashboard-link"><span .setting-name>{translate("Linked")}</span><span .setting-value .dashboard-id>{handler.get_option("dashboard_user_id").substr(0, 10) + ".."}</span></div>
+                            : <div .setting-row .setting-action id="action-dashboard-link"><span .setting-name>{translate("Enter Invite Code")}</span><span .setting-arrow>&#x203A;</span></div>
+                        }
+                    </div>
+                    <div .setting-row .setting-action id="action-about" style="padding:8px 16px;"><span .setting-name>{translate("About")} {" "} {handler.get_app_name()}</span><span .setting-arrow>&#x203A;</span></div>
+                </div>
+            </div>
+        </div>;
+    }
+
+	event click $(.idbox) {
+		var el = $(#idbox);
+		handler.copy_text(el.value);
+	}
+
+	event click $(#copy-id) {
+		var el = $(#idbox);
+		handler.copy_text(el.value);
+	}
+
+	event click $(svg#settings-gear) {
+		showSettings();
+	}
+
+	event click $(menu#config-options>li) (_, me) {
+		myIdMenu.handleMenuClick(me);
+	}
+
+	event click $(button#connect) {
+        this.newRemote("connect");
+    }
+
+    event click $(button#install-btn) {
+        handler.goto_install();
+    }
+
+    event click $(button#mac-enable-perms) {
+        handler.is_can_screen_recording(true);
+        watch_screen_recording();
+    }
+
+    event click $(button#mac-enable-perms-acc) {
+        handler.is_process_trusted(true);
+        watch_trust();
+    }
+
+    event click $(div#invite-pill) {
+        showInviteDialog();
+    }
+
+    event click $(#ticket-icon) {
+        if (handler.get_option("dashboard_user_id") != "") {
+            handler.open_ticket_portal();
+        } else {
+            msgbox("custom-error", translate("Tickets"), translate("Tickets can only be created if this device is linked to a dashboard user."));
+        }
+    }
+
+    function showInviteDialog() {
+        msgbox("custom-invite", translate("Invite A Device"),
+            "<div .form>" +
+            "<div>" + translate("Input an ID to send a connection invitation for this device:") + "</div>" +
+            "<input|text(remote_invite_id) style='width:*; margin-top:0.5em; margin-bottom:1em;' spellcheck='false' maxlength='10' placeholder='" + translate("Device ID to invite") + "' />" +
+            "<div class='buttons' style='text-align:right; margin-top:1em;'>" +
+            "</div>" +
+            "</div>",
+            null,
+            function(res) {
+                if (!res) return;
+				if (res && typeof res.remote_invite_id !== 'undefined') {
+                    var remote_id = (res.remote_invite_id || "").replace(/\s/g, "");
+                    if (remote_id) {
+                        var current_id = get_id();
+                        var current_password = handler.temporary_password();
+                        if (!current_password) {
+                            stdout.println("Temporary password is not available, sending invite with empty password or permanent if configured.");
+                        }
+                        if (remote_id == current_id) {
+                            msgbox("custom-error", translate("Error"), translate("Can not invite yourself."));
+                            return;
+                        }
+						if (remote_id.length > 10 || remote_id.length < 9) {
+							msgbox("custom-error", translate("Error"), translate("Please enter a valid device ID."));
+							return;
+						}
+						if (!/^[0-9]+$/.test(remote_id)) {
+							msgbox("custom-error", translate("Error"), translate("Device ID must contain only numbers (0-9)."));
+							return;
+						}
+                        handler.send_peer_invite(remote_id, current_id, current_password);
+                    }
+                } else {
+                    //stdout.println("Invite cancelled.");
+                }
+            },
+            240
+        );
+    }
+
+    event click $(button#file-transfer) {
+        this.newRemote("file-transfer");
+    }
+    
+    function newRemote(type) {
+        createNewConnect(this.remote_id.value, type);
+    }
+
+    event click $(#launch-update) {
+        handler.open_url("https://www.hoptodesk.com");
+    }
+}
+
+class InstallMe: Reactor.Component {
+    function render() {
+        return <div .install-me style="margin-top: -4px;">
+            <span />
+            <div id="installtip">{translate('install_tip')}</div>
+            <div><center><button #install-me .button title={translate('Install')}>{translate('Install')}</button></center></div>
+        </div>;
+    }
+
+    event click $(#install-me) {
+        handler.goto_install();
+    }
+}
+
+class EmptyMe: Reactor.Component {
+    function render() {
+        return <div .empty-brand>
+            <img .empty-featured src="" />
+        </div>;
+    }
+}
+
+function download(from, to, args..) {
+    var rqp = { type:#get, url: from, toFile: to, noCache: true };
+    var fn = 0;
+    var on = 0;
+    for( var p in args ) {
+        if( p instanceof Function ) {
+            switch(++fn) {
+                case 1: rqp.success = p; break;
+                case 2: rqp.error = p; break;
+                case 3: rqp.progress = p; break;
+            }
+        } else if( p instanceof Object ) {
+            switch(++on) {
+                case 1: rqp.params = p; break;
+                case 2: rqp.headers = p; break;
+            }
+        }
+    }
+    view.request(rqp);
+}
+
+/*
+class UpdateMe: Reactor.Component {
+    function render() {
+        var update_or_download = "download"; // !is_win ? "download" : "update";
+        return <div .install-me>
+            <div>{translate('Status')}</div>
+            <div>There is a newer version of {handler.get_app_name()} ({handler.get_new_version()}) available.</div>
+            <div #install-me.link>{translate('Click to ' + update_or_download)}</div>
+            <div #download-percent style="display:hidden; padding-top: 1em;" />
+        </div>;
+    }
+
+    event click $(#install-me) {
+        handler.open_url("https://www.hoptodesk.com");
+        return;
+    }
+}
+*/
+class SystemError: Reactor.Component {
+    function render() {
+        return <div .install-me>
+            <div>{system_error}</div>
+        </div>;
+    }
+}
+
+class TrustMe: Reactor.Component {
+    function render() {
+        return <div .trust-me #trust-me-box style="margin-top: -4px;">
+            <div style="margin-top: 10px;">{translate('Permissions')}</div>
+            <div style="text-align: center">{translate('config_acc')}</div>
+            <div #trust-me .link>{translate('Configure')}</div>
+        </div>;
+    }
+
+    event click $(#trust-me) {
+        handler.is_process_trusted(true);
+        watch_trust();
+    }
+}
+
+class CanScreenRecording: Reactor.Component {
+    function render() {
+        return <div .trust-me #screen-recording-box style="margin-top: -4px;">
+            <div>{translate('Permissions')}</div>
+            <div>{translate('config_screen')}</div>
+            <div #screen-recording .link>{translate('Configure')}</div>
+            <div #help-me style="display:none" .link>{translate('Help')}</div>
+        </div>;
+    }
+
+    event click $(#screen-recording) {
+        handler.is_can_screen_recording(true);
+        watch_screen_recording();
+    }
+
+    event click $(#help-me) {
+        handler.open_url(translate("doc_mac_permission"));
+    }
+}
+
+class InstallDaemon: Reactor.Component {
+    function render() {
+        return <div .install-me>
+            <span />
+            <div>{translate('install_daemon_tip')}</div>
+            <div #install-me.link>{translate('Install')}</div>
+        </div>;
+    }
+
+    event click $(#install-me) {
+        handler.is_installed_daemon(true);
+    }
+}
+
+class FixWayland: Reactor.Component {
+    function render() {
+        return <div .trust-me style="margin-top: -4px;">
+            <div style="margin-top: 10px; padding-top: 5px;">{translate('Change Display')}</div>
+            <div>{translate('Login screen using Wayland is not supported.')}</div>
+            <div #fix-wayland .link>{translate('Disable Wayland')}</div>
+            <div style="text-align: center">({translate('Reboot required')})</div>
+        </div>;
+    }
+
+    event click $(#fix-wayland) {
+        handler.fix_login_wayland();
+        app.update();
+    }
+}
+
+class ModifyDefaultLogin: Reactor.Component {
+    function render() {
+        return <div .trust-me>
+            <div style="margin-top: 10px; padding-top: 5px;">{translate('Change Display')}</div>
+            <div>{translate('Current Wayland display server is not supported.')}</div>
+            <div #modify-default-login .link>{translate('Disable Wayland')}</div>
+            <div style="text-align: center">({translate('Reboot required')})</div>
+        </div>;
+    }
+
+    event click $(#modify-default-login) {
+        if (var r = handler.modify_default_login()) {
+            // without handler, will fail, fucking stupid sciter
+            handler.msgbox("custom-error", "Error", r);
+        }
+        app.update();
+    }
+
+    event click $(#help-me) {
+        handler.open_url(translate("doc_fix_wayland"));
+    }
+}
+
+function watch_trust() {
+    // not use TrustMe::update, because it is buggy
+    var trusted = handler.is_process_trusted(false);
+    var el = $(div#trust-me-box);
+    if (el) {
+        el.style.set {
+            display: trusted ? "none" : "block",
+        };
+    }
+    if (trusted) {
+        app.update();
+        return;
+    }
+    self.timer(1s, watch_trust);
+}
+
+function watch_screen_recording() {
+    var trusted = handler.is_can_screen_recording(false);
+    var el = $(div#screen-recording-box);
+    if (el) {
+        el.style.set {
+            display: trusted ? "none" : "block",
+        };
+    }
+    if (trusted) {
+        app.update();
+        return;
+    }
+    self.timer(1s, watch_screen_recording);
+}
+
+class PasswordEyeArea : Reactor.Component {
+    render() {
+        if (!key_confirmed) {
+            return <div #passwordbox .passwordbox readonly>...</div>;
+        }
+        var value = password_cache[0] || handler.temporary_password() || "";
+        return
+            <div #passwordbox .passwordbox readonly title={translate('Password (Click to Copy)')}>{value}</div>;
+    }
+
+    event click $(#passwordbox) (_, me) {
+        var pw = password_cache[0] || "";
+        if (pw && pw != "-") { handler.copy_text(pw); }
+    }
+}
+
+var temporaryPasswordLengthMenu;
+class TemporaryPasswordLengthMenu: Reactor.Component {
+    function this() {
+        temporaryPasswordLengthMenu = this;
+    }
+
+    function render() {
+        if (!this.show) return <li />;
+        var me = this;
+        var method = handler.get_option('verification-method');
+        self.timer(1ms, function() { me.toggleMenuState() });
+        return <li disabled={ method == 'use-permanent-password' ? "true" : "false" }>{translate("One-time password length")}
+            <menu #temporary-password-length>
+                <li #temporary-password-length-6><span>{svg_checkmark}</span>6</li>
+                <li #temporary-password-length-8><span>{svg_checkmark}</span>8</li>
+                <li #temporary-password-length-10><span>{svg_checkmark}</span>10</li>
+            </menu>
+        </li>;
+    }
+
+    function toggleMenuState() {
+        var length = handler.get_option("temporary-password-length");
+        var index = ['6', '8', '10'].indexOf(length);
+        if (index < 0) index = 0;
+        for (var (i, el) in this.$$(menu#temporary-password-length>li)) {
+            el.attributes.toggleClass("selected", i == index);
+        }
+    }
+
+    event click $(menu#temporary-password-length>li) (_, me) {
+        var length = me.id.substring('temporary-password-length-'.length);
+        var old_length = handler.get_option('temporary-password-length');
+        if (length != old_length) {
+            handler.set_option('temporary-password-length', length);
+            handler.update_temporary_password();
+            this.toggleMenuState();
+            passwordArea.update();
+        }
+    }
+}
+
+var passwordArea;
+class PasswordArea: Reactor.Component {
+    function this() {
+        passwordArea = this;
+    }
+
+    function render() {
+        var isunattended = handler.get_option("unattended-access");
+		var is_sso = handler.get_option("sso-login");
+		if (is_sso) {
+			return
+			<div .password-area>
+				<div .pw-label>{translate('Password')}</div>
+				<div .sso-badge>SSO Mode</div>
+			</div>;
+		}
+		if (isunattended) {
+			return
+			<div .password-area>
+				<div .pw-label>{translate('Password')}</div>
+				<div .pw-value-row>
+					<PasswordEyeArea />
+					{key_confirmed ? <div #edit-pill .pw-pill title={translate('Password settings')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>{translate('Set')}</div> : ""}
+					<div style="width:*;" />
+					<div .pw-toggle-inline>
+						<span id="unattendedlabel">{translate('Unattended Access')}</span>
+						<label .toggle-switch title={translate('Set a permanent password to allow access to this device at any time, even when no one is present.')}>
+						    <input type="checkbox" id="unattendedcheckbox" name="unattendedcheckbox" checked />
+						    <span .toggle-slider />
+						</label>
+					</div>
+				</div>
+			</div>;
+		} else {
+			return
+			<div .password-area>
+				<div .pw-label>{translate('Password')}</div>
+				<div .pw-value-row>
+					<PasswordEyeArea />
+					{key_confirmed ? <div #edit-pill .pw-pill title={translate('Password settings')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>{translate('Set')}</div> : ""}
+					<div style="width:*;" />
+					<div .pw-toggle-inline>
+						<span id="unattendedlabel">{translate('Unattended Access')}</span>
+						<label .toggle-switch title={translate('Set a permanent password to allow access to this device at any time, even when no one is present.')}>
+						    <input type="checkbox" id="unattendedcheckbox" name="unattendedcheckbox" />
+						    <span .toggle-slider />
+						</label>
+					</div>
+				</div>
+			</div>;
+		}
+    }
+
+    event click $(#edit-pill) {
+        passwordSettingsOpen = true;
+        app.update();
+    }
+
+    event click $(#unattendedcheckbox) (_, me) {
+		if (me.state.checked) {
+			handler.set_option("unattended-access", "true");
+			$(#unattendedlabel).style.set{color: "#333"};
+		} else {
+			handler.set_option("unattended-access", "");
+			$(#unattendedlabel).style.set{color: "#94A3B8"};
+		}
+    }
+}
+
+var password_cache = ["","","",""];
+function updatePasswordArea() {
+    self.timer(1s, function() {
+        var temporary_password = handler.temporary_password();
+        var verification_method = handler.get_option('verification-method');
+        var temporary_password_length = handler.get_option('temporary-password-length');
+        var approve_mode = handler.get_option('approve-mode');
+        var update = false;
+        if (password_cache[0] != temporary_password) {
+            password_cache[0] = temporary_password;
+            update = true;
+        }
+        if (password_cache[1] != verification_method) {
+            password_cache[1] = verification_method;
+            update = true;
+        }
+        if (password_cache[2] != temporary_password_length) {
+            password_cache[2] = temporary_password_length;
+            update = true;
+        }
+        if (password_cache[3] != approve_mode) {
+            password_cache[3] = approve_mode;
+            update = true;
+        }
+        if (update) passwordArea.update();
+        updatePasswordArea();
+    });
+}
+updatePasswordArea();
+
+class ID: Reactor.Component {
+    function render() {
+        return <input type="text" #remote_id .outline-focus title={translate('Enter Remote ID')} novalue={translate("Enter Remote ID")} maxlength="21"
+        value={formatId(handler.get_remote_id())} />;
+    }
+
+    // https://github.com/c-smile/sciter-sdk/blob/master/doc/content/sciter/Event.htm
+    event change {
+        var fid = formatId(this.value);
+        var d = this.value.length - (this.old_value || "").length;
+        this.old_value = this.value;
+        var start = this.xcall(#selectionStart) || 0;
+        var end = this.xcall(#selectionEnd);
+        if (fid == this.value || d <= 0 || start != end) {
+            return;
+        }
+        // fix Caret position
+        this.value = fid;
+        var text_after_caret = this.old_value.substr(start);
+        var n = fid.length - formatId(text_after_caret).length;
+        this.xcall(#setSelection, n, n);
+    }
+}
+
+var reg = /^\d+$/;
+function formatId(id) {
+    id = id.replace(/\s/g, "");
+    if (reg.test(id) && id.length > 3) {
+        var n = id.length;
+        var a = n % 3 || 3;
+        var new_id = id.substr(0, a);
+        for (var i = a; i < n; i += 3) {
+            new_id += " " + id.substr(i, 3);
+        }
+        return new_id;
+    }
+    return id;
+}
+
+event keydown (evt) {
+    if (view.focus && view.focus.id != 'remote_id') {
+        return;
+    }
+    if (!evt.shortcutKey) {
+        if (isEnterKey(evt)) {
+            var el = $(button#connect);
+            view.focus = el;
+            el.sendEvent("click");
+            // simulate button click effect, windows does not have this issue
+            el.attributes.toggleClass("active", true);
+            self.timer(0.3s, function() {
+                el.attributes.toggleClass("active", false);
+            });
+        }
+    }
+}
+
+$(body).content(<div style="size:*"><App /><div #msgbox /></div>);
+
+function self.closing() {
+    var (x, y, w, h) = view.box(#rectw, #border, #screen);
+    handler.closing(x, y, w, h);
+    return true;
+}
+
+function self.ready() {
+    var r = handler.get_size();
+	var isquicksupport = handler.get_option('quicksupport') || handler.running_qs();	
+    if (isReasonableSize(r) && r[2] > 0) {
+        var (sx, sy, sw, sh) = view.screenBox(#workarea, #rectw);
+		if (sw <= 800) {
+			var el = $(#installtip);
+			el.style.set{display: "none"};
+		}
+		if (r[2] >= sw && r[3] >= sh) {
+			if (!isquicksupport) {
+				self.timer(1ms, function() { view.windowState = View.WINDOW_MAXIMIZED; });
+			}
+        } else {
+            view.move(r[0], r[1], r[2], r[3]);
+        }
+    } else {
+		centerize(scaleIt(800), scaleIt(655));
+    }
+
+	if (isquicksupport) {
+		var pixelsPerInch = self.toPixels(1in);
+		if (pixelsPerInch >= 120) {
+			var el = $(#right-pane);
+			el.style.set{display: "none"};
+			centerize(scaleIt(180), scaleIt(130));
+		} else {
+			centerize(scaleIt(200), scaleIt(130));
+		}
+		
+		view.windowResizable = false;
+		view.windowMaximizable = false;
+	}
+	
+    if (!handler.get_remote_id()) {
+        view.focus = $(#remote_id);
+    }
+	//refreshCurrentUser();
+    updateTheme();
+	
+	var (sxm, sym, swm, shm) = view.screenBox(#workarea, #rectw);
+	if (swm <= 800) {
+		var el = $(#installtip);
+		el.style.set{display: "none"};
+	}
+}
+
+function showGen2FA() {
+    myIdMenu.showGen2FA();
+}
+
+function showAbout() {
+    myIdMenu.showAbout();
+}
+
+function showSettings() {
+	if ($(#overlay).style#display == 'block') return;
+    showSettingsPanel();
+}
+
+function showSettingsPanel() {
+    settingsPanelOpen = !settingsPanelOpen;
+    app.update();
+}
+
+function closeSettingsPanel() {
+    settingsPanelOpen = false;
+    app.update();
+}
+
+function handleSettingsToggle(id) {
+    var optionId = id.replace("toggle-", "");
+    if (optionId == "stop-service") {
+        handler.set_option("stop-service", service_stopped ? "" : "Y");
+    } else if (optionId == "allow-darktheme") {
+        handler.set_option("allow-darktheme", handler.get_option("allow-darktheme") == "Y" ? "" : "Y");
+        updateTheme();
+    } else if (optionId == "enable-wol") {
+        var wasEnabled = handler.get_option("enable-wol") == "Y";
+        handler.set_option("enable-wol", wasEnabled ? "N" : "Y");
+        handler.set_option("wol-enabled", wasEnabled ? "" : "true");
+        if (!wasEnabled) {
+            closeSettingsPanel();
+            self.timer(100ms, showWolInstructions);
+        }
+    } else if (optionId == "enable-remote-printing") {
+        handler.set_option("enable-remote-printing", handler.get_option("enable-remote-printing") == "Y" ? "N" : "Y");
+    } else if (optionId == "direct-server") {
+        handler.set_option("direct-server", handler.get_option("direct-server") == "Y" ? "" : "Y");
+    } else if (optionId == "enable-audio") {
+        handler.set_option("enable-audio", handler.get_option("enable-audio") != "N" ? "N" : "");
+    } else if (optionId.indexOf("enable-") == 0) {
+        handler.set_option(optionId, handler.get_option(optionId) == "N" ? "" : "N");
+    }
+    app.update();
+}
+
+function showWolInstructions() {
+    msgbox("nocancel", translate("Wake On LAN"),
+        <div .form>
+            <div style="margin-bottom:10px;">{translate("Wake On LAN lets you power on this device remotely from another HopToDesk client or the dashboard.")}</div>
+            <div style="margin-bottom:6px;font-weight:bold;">{translate("Requirements:")}</div>
+            <div style="margin-bottom:4px;padding-left:8px;">&#x2022; {translate("This device must be connected via Ethernet (not WiFi)")}</div>
+            <div style="margin-bottom:4px;padding-left:8px;">&#x2022; {translate("WoL must be enabled in the device's BIOS/UEFI settings")}</div>
+            <div style="margin-bottom:4px;padding-left:8px;">&#x2022; {translate("The network adapter must have WoL enabled in OS settings")}</div>
+            <div style="margin-bottom:10px;padding-left:8px;">&#x2022; {translate("Another HopToDesk device on the same network must be online to relay the wake signal")}</div>
+            <div style="color:#6C757D;font-size:0.9em;">{translate("The wake signal is sent by another online HopToDesk device on the same local network. You can trigger it from the address book in any HopToDesk client, or from the dashboard if enrolled.")}</div>
+        </div>,
+        "", function() {}, 280);
+}
+
+function handleSettingsAction(id) {
+    var actionId = id.replace("action-", "");
+    closeSettingsPanel();
+    if (actionId == "custom-api-url") {
+        myIdMenu.handleMenuClick({id: "custom-api-url"});
+    } else if (actionId == "socks5-server") {
+        myIdMenu.handleMenuClick({id: "socks5-server"});
+    } else if (actionId == "tfa") {
+        myIdMenu.showGen2FA();
+    } else if (actionId == "about") {
+        myIdMenu.showAbout();
+    } else if (actionId == "language") {
+        showLanguagePicker();
+    } else if (actionId == "enable-lan-discovery") {
+        handler.set_option("enable-lan-discovery", handler.get_option("enable-lan-discovery") == "N" ? "" : "N");
+        showSettingsPanel();
+    } else if (actionId == "audio-input") {
+        showAudioInputPicker();
+        return;
+    } else if (actionId == "dashboard-link") {
+        showDashboardLinkDialog();
+    }
+}
+
+function showDashboardLinkDialog() {
+    var isLinked = handler.get_option("dashboard_user_id") != "";
+    if (isLinked) {
+        var dashId = handler.get_option("dashboard_user_id");
+        msgbox("custom-dashboard-info", translate("Dashboard"),
+            "<div .form>" +
+            "<div style='margin-bottom:0.5em;'>" + translate("This device is linked to a dashboard.") + "</div>" +
+            "<div style='font-family:monospace; font-size:0.9em; color:#666; margin-bottom:1em; word-break:break-all;'>" + dashId + "</div>" +
+            "<div style='color:#888; font-size:0.85em;'>" + translate("To change, enter a new invite code:") + "</div>" +
+            "<input|text(invite_code) style='width:*; margin-top:0.5em;' spellcheck='false' maxlength='16' placeholder='" + translate("16-character invite code") + "' />" +
+            "</div>",
+            null,
+            function(res) {
+                if (!res) return;
+                if (res && typeof res.invite_code !== 'undefined') {
+                    var code = (res.invite_code || "").replace(/\s/g, "");
+                    if (code.length == 0) return;
+                    if (!validateInviteCode(code)) {
+                        msgbox("custom-error", translate("Error"), translate("Invalid invite code. Must be 16 characters (letters and numbers)."));
+                        return;
+                    }
+                    handler.set_option("invite_code", code);
+                    msgbox("custom-success-noedit", translate("Dashboard"), translate("Linking to dashboard... This device will appear in the dashboard shortly."));
+                }
+            }, 360);
+    } else {
+        msgbox("custom-dashboard-link", translate("Dashboard"),
+            "<div .form>" +
+            "<div style='margin-bottom:0.5em;'>" + translate("Enter your invite code to link this device to a dashboard.") + "</div>" +
+            "<div style='color:#888; font-size:0.85em; margin-bottom:0.5em;'>" + translate("You can find this code in your dashboard invite link.") + "</div>" +
+            "<input|text(invite_code) style='width:*; margin-top:0.5em;' spellcheck='false' maxlength='16' placeholder='" + translate("16-character invite code") + "' />" +
+            "</div>",
+            null,
+            function(res) {
+                if (!res) return;
+                if (res && typeof res.invite_code !== 'undefined') {
+                    var code = (res.invite_code || "").replace(/\s/g, "");
+                    if (code.length == 0) return;
+                    if (!validateInviteCode(code)) {
+                        msgbox("custom-error", translate("Error"), translate("Invalid invite code. Must be 16 characters (letters and numbers)."));
+                        return;
+                    }
+                    handler.set_option("invite_code", code);
+                    msgbox("custom-success-noedit", translate("Dashboard"), translate("Linking to dashboard... This device will appear in the dashboard shortly."));
+                }
+            }, 360);
+    }
+}
+
+function validateInviteCode(code) {
+    if (code.length != 16) return false;
+    var hasUpper = false;
+    for (var i = 0; i < code.length; i++) {
+        var c = code.charAt(i);
+        if (c >= 'A' && c <= 'Z') hasUpper = true;
+        else if (c >= 'a' && c <= 'z') {}
+        else if (c >= '0' && c <= '9') {}
+        else return false;
+    }
+    return hasUpper;
+}
+
+function showLanguagePicker() {
+    var langs = JSON.parse(handler.get_langs());
+    var cur = handler.get_local_option("lang") || "default";
+    var html = "<div .form style='max-height: 300px; overflow-y: scroll-indicator;'>";
+    for (var lang in langs) {
+        var selected = (lang[0] == cur) ? " style='font-weight:bold; color: #2C8CFF;'" : "";
+        html += "<div .custom-event lang-id='" + lang[0] + "'" + selected + " style='padding: 6px 10px; cursor:pointer;'>" + lang[1] + "</div>";
+    }
+    html += "</div>";
+    msgbox("custom-nocancel-nook", translate("Language"), html, "", function(el) {
+        if (el && el.attributes && el.attributes["lang-id"]) {
+            var v = el.attributes["lang-id"];
+            if (v == "default") v = "";
+            handler.set_local_option("lang", v);
+            closeMsgbox();
+            app.update();
+        }
+    }, 300);
+}
+
+function showAudioInputPicker() {
+    var inputs = handler.get_sound_inputs();
+    if (is_win) inputs = ["System Sound"].concat(inputs);
+    if (!inputs.length) return;
+    var curDefault = is_win ? "System Sound" : "";
+    var cur = handler.get_option("audio-input") || curDefault;
+    var html = "<div .form style='max-height: 300px; overflow-y: scroll-indicator;'>";
+    for (var name in inputs) {
+        var selected = (name == cur) ? " style='font-weight:bold; color: #2C8CFF;'" : "";
+        html += "<div .custom-event audio-id='" + name + "'" + selected + " style='padding: 6px 10px; cursor:pointer;'>" + translate(name) + "</div>";
+    }
+    html += "</div>";
+    msgbox("custom-nocancel-nook", translate("Audio Input"), html, "", function(el) {
+        if (el && el.attributes && el.attributes["audio-id"]) {
+            var v = el.attributes["audio-id"];
+            if (v == curDefault) v = "";
+            handler.set_option("audio-input", v);
+            closeMsgbox();
+            app.update();
+        }
+    }, 300);
+}
+
+self << event click $(#settings-backdrop) {
+    closeSettingsPanel();
+}
+
+self << event click $(#settings-panel .settings-close) {
+    closeSettingsPanel();
+}
+
+self << event click $(#settings-panel .setting-row) (_, me) {
+    var id = me.id;
+    if (id.indexOf("toggle-") == 0) {
+        handleSettingsToggle(id);
+    } else {
+        handleSettingsAction(id);
+    }
+}
+
+function showUpdatePopup() {
+    myIdMenu.showUpdatePopup();
+}
+
+//hophere update
+function updateCheck() {
+	if (showingupdate === "1") {return;}
+	if (handler.get_local_option("dontshowagain") === "1") {return;}
+	
+	if (handler.requires_update()) {
+		showUpdatePopup();
+	}
+	
+	//check for update every 12 hours or 1 hour
+	tmp = handler.get_connect_status();
+	var timeout = (tmp[0] == 1) ? 43200s : 3600s;
+	
+	self.timer(timeout, function() {
+		handler.set_version_sync();
+		stdout.println("Reloading API");
+		if (handler.requires_update()) {
+			showUpdatePopup();
+		}
+		updateCheck();
+    });		
+}
+updateCheck();
+
+function checkConnectStatus() {
+    //handler.check_mouse_time(); // trigger connection status updater
+
+    self.timer(1s, function() {
+        var tmp = !!handler.get_option("stop-service");
+		
+        if (tmp != service_stopped) {
+            service_stopped = tmp;
+            app.update();
+        }
+        tmp = handler.get_connect_status();
+		if (tmp[0] != connect_status) {
+            connect_status = tmp[0];
+            app.connect_status.update();
+        }
+        if (tmp[1] != key_confirmed) {
+            key_confirmed = tmp[1];
+            app.update();
+        }
+        if (tmp[2] && tmp[2] != my_id) {
+            app.update();
+        }
+        tmp = handler.get_error();
+        if (system_error != tmp) {
+            system_error = tmp;
+            app.update();
+        }
+        if (handler.recent_sessions_updated()) {
+            stdout.println("recent sessions updated");
+            updateAbPeer();
+            app.update();
+        }
+		check_if_overlay();
+        checkConnectStatus();
+    });
+}
+
+var enter = false;
+function self.onMouse(evt) {
+	switch(evt.type) {
+    case Event.MOUSE_ENTER:
+		enter = true;
+        check_if_overlay();
+        break;
+    case Event.MOUSE_LEAVE:
+		$(#overlay).style#display = 'none';
+        enter = false;
+        break;
+    }
+}
+
+function check_if_overlay() {
+    if (handler.get_option('allow-remote-config-modification') != 'Y') {
+        var time0 = getTime();
+        handler.check_mouse_time();
+        self.timer(120ms, function() {
+            if (!enter) return;
+            var d = time0 - handler.get_mouse_time();
+            if (d < 120) $(#overlay).style#display = 'block';
+        });
+    }
+}
+
+checkConnectStatus();
+
+function set_local_user_info(user) {
+    var user_info = {name: user.name};
+    if (user.status) {
+        user_info.status = user.status;
+    }
+    handler.set_local_option("user_info", JSON.stringify(user_info));
+}
+
+

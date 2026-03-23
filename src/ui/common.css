@@ -1,0 +1,614 @@
+html {
+    var(accent): #0052CC;
+    var(button): #2C8CFF;
+    var(gray-bg): #F1F5F9;
+    var(gray-bg-grad): #F8FAFC;
+    var(bg): white;
+    var(border): #E2E8F0;
+    var(hover-border): #94A3B8;
+    var(text): #1E293B;
+    var(placeholder): #94A3B8;
+    var(lighter-text): #64748B;
+    var(light-text): #475569;
+    var(menu-hover): #EFF6FF;
+    var(dark-red): #DC2626;
+    var(dark-yellow): #F59E0B;
+    var(dark-blue): #1E3A5F;
+    var(green-blue): #0F766E;
+    var(gray-blue): #1E293B;
+    var(blue-green): #0891B2;
+    var(light-green): #DCFCE7;
+    var(dark-green): #22C55E;
+    var(blood-red): #EF4444;
+    var(topbox): #F8FAFC;
+    var(bottombox): #93C5FD;
+}
+
+html.darktheme {
+    var(bg): #0F172A;
+    var(gray-bg): #1E293B;
+    var(gray-bg-grad): #1E293B;
+    var(menu-hover): #334155;
+    var(border): #334155;
+
+    var(text): #F1F5F9;
+    var(light-text): #94A3B8;
+    var(lighter-text): #64748B;
+    var(placeholder): #475569;
+    var(topbox): #1E293B;
+    var(bottombox): #64748B;
+}
+
+body {
+    margin: 0;
+    color: color(text);
+}
+
+button.button {
+    height: 2.2em;
+    border-radius: 10px;
+    background: color(button);
+    color: white;
+    border-color: color(button);
+    min-width: 40px;
+    padding-left: 20px;
+    padding-right: 20px;
+    padding-top: 5px;
+    padding-bottom: 5px;
+    font-weight: 600;
+    font-size: 1.1em;
+}
+
+button[type=checkbox], button[type=checkbox]:active {
+    background: none;
+    border: none;
+    color: unset;
+    height: 1.4em;
+}
+
+button.outline {
+    border: color(border) solid 1px;
+    background: transparent; 
+    color: color(text);
+}
+
+button.button:active, button.active {
+    background: color(accent);
+    color: color(bg);
+    border-color: color(accent);
+}
+
+button.button:hover, button.outline:hover {
+  border-color: color(hover-border);
+}
+
+input[type=text], input[type=password], input[type=number] {
+    width: *;
+    font-size: 1.5em;
+    border-color: color(border);
+    border-radius: 0;
+    color: color(text);
+    padding-left: 0.5em;
+	background: color(bg);
+}
+
+input:empty {
+    color: color(placeholder);
+}
+
+input.outline-focus:focus {
+    outline: color(button) solid 3px;
+}
+
+textarea {
+    background: color(bg);
+    color: color(text);
+}
+
+textarea:empty {
+    color: color(placeholder);
+}
+
+@set my-scrollbar
+{
+  .prev { display:none; }
+  .next { display:none; }
+  .base, .next-page, .prev-page { background: transparent;}
+  .slider { background: #CBD5E1; border: transparent solid 4px; border-radius: 10px; }
+  .base:disabled { background: transparent; }
+  .slider:hover  { background: #94A3B8; }
+  .slider:active { background: #64748B; }
+  .base { size: 12px; }
+  .corner { background: transparent; }
+}
+
+@mixin ELLIPSIS {
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    overflow-x: hidden;
+}
+
+.ellipsis {
+  @ELLIPSIS;
+}
+
+div.password svg {
+    padding-left: 1em;
+    size: 16px;
+    color: #818385;
+    background: none;
+    padding-top: 4px!important;
+}
+
+.your-desktop input {
+	font-weight: 700;
+	color: #1E293B;
+	font-size: 1.6em;
+	letter-spacing: 1px;
+}
+
+html.darktheme .your-desktop input {
+	color: #F1F5F9;
+}
+
+input {
+	border-radius: 15px;
+}
+
+div.password input {
+    font-family: Consolas, Menlo, Monaco, 'Courier New';
+    font-size: 1.1em;
+	font-weight: 600;
+	color: #475569;
+	background-color: color(topbox);
+}
+
+html.darktheme div.password input {
+	color: #94A3B8;
+}
+
+svg {
+    background: none;
+}
+
+header {
+  border-bottom: color(border) solid 1px;
+  height: 28px;
+  flow: horizontal;
+  overflow-x: hidden;
+  position: relative;
+}
+
+@media platform == "OSX" {
+    header {
+      background: linear-gradient(top,#E4E4E4,#D1D1D1);
+    }
+}
+
+header div.window-icon {
+  size: 28px;
+}
+
+@media platform != "OSX" {
+header {
+  background: color(bg);
+  height: 40px;
+}
+
+header div.window-icon {
+  size: 40px;
+}
+}
+
+header div.window-icon icon {
+  display: block;
+  margin: *;
+  size: 16px;
+  background-size: cover;
+  background-repeat: no-repeat;
+}
+
+header caption {
+  size: *;
+}
+
+@media platform != "OSX" {
+  div.window-buttons {
+    pointer-events: none;
+  }
+  button.window {
+    pointer-events: auto;
+    top: 0;
+    bottom: 0;
+    padding: 0 10px;
+    width: 22px;
+    position: absolute;
+    color: black;
+    border: none;
+    background: none;
+    border-radius: 0;
+  }
+  button.window div {
+    size: 10px;
+    margin: *;
+    background-size: cover;
+    background-repeat: no-repeat;
+  }
+  button.window:hover {
+    background: color(gray-bg);
+  }
+  button.window#minimize {
+    right: 84px;
+  }
+  button.window#maximize {
+    right: 42px;
+  }
+  button.window#close {
+    right: 0px;
+  }
+  button.window#minimize div {
+    height: 3px;
+    border-bottom: black solid 1px;
+    width: 12px;
+  }
+  button.window#maximize div {
+    border: black solid 1px;
+  }
+  button.window#close:hover {
+    background: #F82600;
+  }
+  button.window#close:hover div {
+    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMBAMAAACkW0HUAAAAD1BMVEUAAAD///////////////+PQt5oAAAABXRSTlMAO+hBqp3RzLsAAAAuSURBVAjXY3BkAAIRBiEDBgZGZRACMkEYxAJyQRwgV5EBSsEEoUqgGqDaoYYBALKmBEEnAGy8AAAAAElFTkSuQmCC');
+  }
+  button.window#close div {
+    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMBAMAAACkW0HUAAAAD1BMVEUAAAAAAAAAAAAAAAAAAABPDueNAAAABXRSTlMAO+hBqp3RzLsAAAAuSURBVAjXY3BkAAIRBiEDBgZGZRACMkEYxAJyQRwgV5EBSsEEoUqgGqDaoYYBALKmBEEnAGy8AAAAAElFTkSuQmCC');
+    size: 12px;
+  }
+  button.window#maximize.restore div {
+    border: none;
+    size: 12px;
+    background-image: url('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAwAAAAMAQMAAABsu86kAAAABlBMVEUAAAAAAAClZ7nPAAAAAXRSTlMAQObYZgAAAB1JREFUCNdjsP/AoCDA8P8CQ0MABipgaHBg+H8AAMfSC36WAZteAAAAAElFTkSuQmCC');
+}
+}
+
+div.chatbox {
+  size: *;
+}
+
+div.chatbox div.send svg {
+  size: 14px;
+  color: white;
+}
+
+div.chatbox div.send span:active {
+  opacity: 0.7;
+}
+
+div.chatbox div.send span {
+  display: inline-block;
+  padding: 8px;
+  background: color(button);
+  border-radius: 50%;
+  cursor: pointer;
+  margin-left: 8px;
+}
+
+div.chatbox div.send span:hover {
+  background: color(accent);
+}
+
+div.chatbox .msgs {
+  border: none;
+  size: *;
+  border-bottom: none;
+  overflow-x: hidden;
+  overflow-y: scroll-indicator;
+  border-spacing: 0.8em;
+  padding: 1em;
+  background: color(bg);
+}
+
+div.chatbox div.send {
+  flow: horizontal;
+  height: auto;
+  padding: 10px 12px;
+  background: color(gray-bg);
+  border-top: color(border) 1px solid;
+}
+
+div.chatbox div.send input {
+  height: 32px !important;
+  border-radius: 16px;
+  border: color(border) 1px solid;
+  padding-left: 12px;
+  font-size: 1em;
+  background: color(bg);
+}
+
+div.chatbox div.name {
+  color: color(button);
+  font-size: 0.85em;
+  font-weight: 600;
+}
+
+div.chatbox div.right-side div.name {
+  color: color(dark-green);
+}
+
+div.chatbox div.right-side div {
+  text-align: right;
+}
+
+div.chatbox div.text {
+  margin-top: 0.3em;
+  line-height: 1.4em;
+}
+
+div.chatbox div.msg {
+  padding: 6px 0;
+}
+
+@media platform != "OSX" {
+header .window-toolbar {
+  width: max-content;
+  background: transparent;
+  position: absolute;
+  top: 0;
+  bottom: 0;
+}
+}
+
+/* Hide menus by default - shown via osx-popup-active class overlay */
+menu.context {
+  display: none;
+}
+
+header svg, menu svg {
+  size: 16px;
+}
+
+header span, header button:not(.window), menu span {
+  padding: 4px 6px;
+  margin: * 1px;
+  color: color(light-text);
+  border-radius: 4px;
+}
+
+header button:not(.window) {
+  background: none;
+  border: none;
+}
+
+header span.toolbar-sep {
+  display: inline-block;
+  width: 1px;
+  height: 16px;
+  background: color(border);
+  padding: 0;
+  margin: * 8px;
+}
+
+header span.toolbar-label {
+  font-size: 0.7em;
+  padding: 4px 8px 4px 2px;
+  color: color(lighter-text);
+  font-weight: 600;
+}
+
+progress {
+    display: inline-block;
+    aspect: Progress;
+    border: none;
+    margin-right: 1em;
+    height: 0.25em;
+    background: transparent;
+}
+
+menu {
+  background: color(bg);
+}
+
+menu div.separator {
+  height: 1px;
+  width: *;
+  margin: 5px 0;
+  background: color(gray-bg);
+  border: none;
+}
+
+menu li {
+  color: color(text);
+  position: relative;
+}
+
+menu li:not(.toggle-option):not(.display-item) span {
+  display: none;
+}
+
+.link {
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.link:active {
+  opacity: 0.5;
+}
+
+menu li:hover {
+  background: color(menu-hover);
+  color: color(text);
+}
+menu li.line-through {
+  text-decoration-line: none;
+  color: color(text);
+}
+
+#tags {
+    border: color(border) 1px solid;
+    size: *;
+    padding: 0.5em;
+    overflow-y: scroll-indicator;
+    border-spacing: 0.5em;
+    flow: horizontal-flow;
+}
+
+#tags span {
+    display: inline-block;
+    border: color(border) 1px solid;
+    border-radius: 6px;
+    padding: 3px 0.5em;
+    word-wrap: normal;
+}
+
+#tags span.active {
+    background: color(button);
+    border-color: color(button);
+    color: white;
+}
+
+#tags span:hover {
+    border-color: color(hover-border);
+}
+
+div#msgbox .msgbox-icon svg {
+  size: 56px;
+  background: none;
+}
+
+div#msgbox .form {
+  border-spacing: 0.5em;
+}
+
+div#msgbox .caption {
+  @ELLIPSIS;
+  height: 2.6em;
+  line-height: 2.6em;
+  text-align: center;
+  color: white;
+  font-size: 1.2em;
+  font-weight: bold;
+  padding: 0 1em;
+}
+
+div#msgbox .form .text {
+  @ELLIPSIS;
+}
+
+div#msgbox button.button {
+  margin-left: 1em;
+  font-family: 'opensans-semb';
+  font-weight: 500;
+}
+
+div#msgbox div.password {
+  position: relative;
+}
+
+div#msgbox div.password svg {
+  position: absolute;
+  right: 0.25em;
+  top: 0.25em;
+  padding: 0.5em;
+  color: color(text);
+}
+
+div#msgbox div.set-password {
+  margin-bottom: 1em;
+  border-spacing: 10px;
+}
+
+div#msgbox div.set-password > div {
+  flow: vertical;
+  border-spacing: 4px;
+}
+
+div#msgbox div.set-password > div > span {
+  font-size: 0.85em;
+  font-weight: 600;
+  color: #64748B;
+  line-height: 1.4em;
+}
+
+div#msgbox div.set-password div.password {
+  width: *;
+}
+
+div#msgbox div.set-password div > input {
+  width: *;
+  padding: 8px 10px;
+  border: 1px solid #CBD5E1;
+  border-radius: 8px;
+  font-size: 1em;
+  background: #F8F9FA;
+}
+
+div#msgbox div.set-password div > input:focus {
+  border-color: #0D6EFD;
+  background: white;
+}
+
+div#msgbox div.set-password input {
+  font-size: 1em;
+}
+
+div#msgbox select {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    border: 1px solid color(border);
+    border-radius: 8px;
+    padding: 6px 8px;
+    font-size: 1em;
+    background: color(bg);
+    color: color(text);
+}
+
+div#msgbox #error {
+  color: red;
+}
+
+div.security_number_block {
+  text-align: center;
+  font-family: 'Courier New';
+  font-size: 1.1em;
+  line-height: 2.5em;
+  font-weight: bold;
+}
+
+button.button#connect{
+	font-family: 'opensans-semb';
+    font-size: 1.1em;
+    color: white;
+	font-weight: 600;
+	border-radius: 10px;
+}
+
+
+#installtip {
+	color: color(text);
+}
+
+/* macOS in-window popup overlay (Sciter's native <popup> is broken on ARM64) */
+menu.context.osx-popup-active {
+    display: block;
+    position: fixed;
+    z-index: 10001;
+    background: color(bg);
+    border: 1px solid color(border);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    border-radius: 6px;
+    padding: 4px 0;
+    min-width: 180px;
+}
+menu.context.osx-popup-active li {
+    padding: 4px 24px 4px 24px;
+}
+.osx-popup-backdrop {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 10000;
+    background: transparent;
+}
