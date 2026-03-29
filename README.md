@@ -16,13 +16,14 @@ HopToDesk for FreeBSD is a free, fast, and lightweight remote desktop applicatio
 - **Wake on LAN** — Send magic packets to wake sleeping machines on your network.
 - **Unattended Access** — Set a permanent password for always-on remote access without user interaction.
 - **TCP Tunneling** — Port forwarding and RDP tunneling through encrypted connections.
-- **SOCKS5 Proxy** — Route connections through a SOCKS5 proxy server.
+- **Proxy Support** — Route connections through an HTTP or SOCKS5 proxy server.
 - **Custom Network** — Use your own API server instead of the default HopToDesk network.
 - **Session Recording** — Record incoming and outgoing remote sessions.
 - **Two-Factor Authentication** — TOTP-based 2FA for enhanced security.
 - **Dark Theme** — Full dark mode support across all windows.
 - **LAN Discovery** — Automatically find HopToDesk devices on your local network.
 - **Direct IP Access** — Connect directly by IP address without a relay server.
+- **MCP Capable** — Allow AI agents to view and manage devices with powerful MCP support function.
 - **44 Languages** — Runtime language switching with no restart required.
 
 ## Requirements

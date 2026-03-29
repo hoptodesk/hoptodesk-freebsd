@@ -156,6 +156,39 @@ macro_rules! serde_field_bool {
 pub enum NetworkType {
     Direct,
     ProxySocks,
+    ProxyHttp,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ProxyType {
+    Auto,
+    Socks5,
+    Http,
+}
+
+impl Default for ProxyType {
+    fn default() -> Self {
+        ProxyType::Auto
+    }
+}
+
+impl ProxyType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ProxyType::Auto => "auto",
+            ProxyType::Socks5 => "socks5",
+            ProxyType::Http => "http",
+        }
+    }
+
+    pub fn from_str(s: &str) -> Self {
+        match s.to_lowercase().as_str() {
+            "socks5" => ProxyType::Socks5,
+            "http" => ProxyType::Http,
+            _ => ProxyType::Auto,
+        }
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq)]
@@ -190,6 +223,8 @@ pub struct Socks5Server {
     pub username: String,
     #[serde(default, deserialize_with = "deserialize_string")]
     pub password: String,
+    #[serde(default)]
+    pub proxy_type: ProxyType,
 }
 
 // more variable configs
@@ -1077,23 +1112,43 @@ impl Config {
         }
         config.socks = socks.clone();
         config.store();
+        crate::proxy::clear_resolved_proxy_type();
         Self::sync_proxy_env(&socks);
     }
 
     /// Set ALL_PROXY env var so that reqwest, curl, and other HTTP clients
-    /// automatically route through the SOCKS5 proxy without per-call changes.
+    /// automatically route through the proxy without per-call changes.
     pub fn sync_proxy_env(socks: &Option<Socks5Server>) {
         match socks {
             Some(s) if !s.proxy.is_empty() => {
+                let scheme = Self::proxy_scheme(s);
                 let url = if !s.username.is_empty() {
-                    format!("socks5://{}:{}@{}", s.username, s.password, s.proxy)
+                    format!("{}://{}:{}@{}", scheme, s.username, s.password, s.proxy)
                 } else {
-                    format!("socks5://{}", s.proxy)
+                    format!("{}://{}", scheme, s.proxy)
                 };
                 std::env::set_var("ALL_PROXY", &url);
             }
             _ => {
                 std::env::remove_var("ALL_PROXY");
+            }
+        }
+    }
+
+    /// Get the URL scheme for the proxy type. Resolves Auto to socks5 as default.
+    pub fn proxy_scheme(conf: &Socks5Server) -> &'static str {
+        match conf.proxy_type {
+            ProxyType::Http => "http",
+            ProxyType::Socks5 => "socks5",
+            ProxyType::Auto => {
+                if let Some(resolved) = crate::proxy::get_resolved_proxy_type() {
+                    match resolved {
+                        ProxyType::Http => "http",
+                        _ => "socks5",
+                    }
+                } else {
+                    "socks5"
+                }
             }
         }
     }
@@ -1128,7 +1183,22 @@ impl Config {
     pub fn get_network_type() -> NetworkType {
         match &CONFIG2.read().unwrap().socks {
             None => NetworkType::Direct,
-            Some(_) => NetworkType::ProxySocks,
+            Some(s) => {
+                match s.proxy_type {
+                    ProxyType::Http => NetworkType::ProxyHttp,
+                    ProxyType::Socks5 => NetworkType::ProxySocks,
+                    ProxyType::Auto => {
+                        if let Some(resolved) = crate::proxy::get_resolved_proxy_type() {
+                            match resolved {
+                                ProxyType::Http => NetworkType::ProxyHttp,
+                                _ => NetworkType::ProxySocks,
+                            }
+                        } else {
+                            NetworkType::ProxySocks
+                        }
+                    }
+                }
+            }
         }
     }
 

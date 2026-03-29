@@ -1,6 +1,7 @@
 pub mod api;
 pub mod compress;
 pub mod platform;
+pub mod proxy;
 pub mod protos;
 pub use bytes;
 use config::Config;

@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 mod keyboard;
 /// cbindgen:ignore
 pub mod platform;

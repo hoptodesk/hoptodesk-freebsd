@@ -1,8 +1,38 @@
 use std::io::{self, BufRead, Write};
+use std::time::Instant;
+use std::collections::HashMap;
+use std::sync::Mutex;
 use serde_json::{json, Value};
 use std::time::Duration;
+use lazy_static::lazy_static;
 use hbb_common::tokio;
 use hbb_common::config::PeerConfig;
+
+// Workflow recording state
+struct WorkflowStep {
+    tool_name: String,
+    arguments: Value,
+    timestamp_ms: u64,
+}
+
+struct WorkflowState {
+    recording: bool,
+    steps: Vec<WorkflowStep>,
+    start_time: Option<Instant>,
+}
+
+lazy_static! {
+    // Static storage for screen_diff_summary references (reference_id -> (rgba, width, height, created))
+    static ref DIFF_REFS: Mutex<HashMap<String, (Vec<u8>, u32, u32, Instant)>> =
+        Mutex::new(HashMap::new());
+
+    static ref WORKFLOW_STATE: Mutex<WorkflowState> =
+        Mutex::new(WorkflowState {
+            recording: false,
+            steps: Vec::new(),
+            start_time: None,
+        });
+}
 
 const SERVER_NAME: &str = "hoptodesk-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -124,6 +154,11 @@ fn process_line(line: &str) -> Option<String> {
         "initialize" => handle_initialize(&request),
         "tools/list" => handle_tools_list(),
         "tools/call" => handle_tools_call(&request),
+        "prompts/list" => handle_prompts_list(),
+        "prompts/get" => handle_prompts_get(&request),
+        "resources/list" => handle_resources_list(),
+        "resources/read" => handle_resources_read(&request),
+        "roots/list" => handle_roots_list(),
         "ping" => json!({ "jsonrpc": "2.0", "id": id, "result": {} }),
         _ => json!({
             "jsonrpc": "2.0",
@@ -295,7 +330,10 @@ fn handle_initialize(_request: &Value) -> Value {
         "result": {
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {
-                "tools": {}
+                "tools": {},
+                "prompts": {},
+                "resources": {},
+                "roots": { "listChanged": false }
             },
             "serverInfo": {
                 "name": SERVER_NAME,
@@ -303,6 +341,114 @@ fn handle_initialize(_request: &Value) -> Value {
             }
         }
     })
+}
+
+fn handle_prompts_list() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "prompts": [
+                { "name": "device_health_check", "description": "Check device health: CPU, memory, disk, and connectivity status" },
+                { "name": "automate_ui_task", "description": "Step-by-step UI automation using screenshot, find, click, and verify pattern" },
+                { "name": "monitor_screen", "description": "Watch a screen region for changes and report when something happens" },
+                { "name": "connect_and_verify", "description": "Connect to a remote peer and verify the session is working properly" },
+                { "name": "diagnose_connection", "description": "Diagnose why a remote connection is failing or performing poorly" },
+                { "name": "file_operations", "description": "Transfer and manage files between local and remote devices" },
+                { "name": "run_maintenance", "description": "Run standard maintenance tasks: clear temp files, check updates, restart services" },
+                { "name": "screen_interaction", "description": "Best practice pattern for screen interaction: screenshot → identify → click → verify" },
+                { "name": "batch_device_check", "description": "Check status of multiple devices via dashboard API" }
+            ]
+        }
+    })
+}
+
+fn handle_prompts_get(request: &Value) -> Value {
+    let name = request["params"]["name"].as_str().unwrap_or("");
+    let messages = match name {
+        "device_health_check" => json!([{ "role": "user", "content": { "type": "text", "text": "Check this device's health. Use get_device_info for basic status, then exec_operation with 'get_system_info' for CPU/memory, 'disk_usage' for storage, and 'network_info' for connectivity. Summarize any issues found." } }]),
+        "automate_ui_task" => json!([{ "role": "user", "content": { "type": "text", "text": "To automate a UI task: 1) Take a screenshot to understand the current state. 2) Identify the target element's coordinates. 3) Use mouse_click or type_text to interact. 4) Use verify_action_result to confirm the action worked. 5) Repeat for each step." } }]),
+        "monitor_screen" => json!([{ "role": "user", "content": { "type": "text", "text": "Monitor a screen region for changes. Use screen_diff_summary to capture a baseline, then periodically call it again with the reference_id to check for changes." } }]),
+        "connect_and_verify" => json!([{ "role": "user", "content": { "type": "text", "text": "Connect to a remote peer: 1) Use list_peers to find the target device. 2) Use connect_to_peer with the peer_id. 3) Use wait_for_event with 'connection_ready'. 4) Use get_ui_state to verify. 5) Take a screenshot to confirm." } }]),
+        "diagnose_connection" => json!([{ "role": "user", "content": { "type": "text", "text": "Diagnose a connection issue: 1) Use get_device_info. 2) Use list_active_connections. 3) Use get_ui_state for quality metrics. 4) Use exec_operation with 'ping_test'. 5) Use exec_operation with 'network_info'. Report findings." } }]),
+        "file_operations" => json!([{ "role": "user", "content": { "type": "text", "text": "For file operations: 1) Use list_local_files to browse. 2) Use read_local_file for contents. 3) Use connect_to_peer with 'file-transfer'. 4) Use get_clipboard/set_clipboard for small transfers." } }]),
+        "run_maintenance" => json!([{ "role": "user", "content": { "type": "text", "text": "Run maintenance: 1) exec_operation 'get_system_info'. 2) exec_operation 'clear_temp_files'. 3) exec_operation 'run_update_check'. 4) exec_operation 'flush_dns'. 5) exec_operation 'restart_hoptodesk'." } }]),
+        "screen_interaction" => json!([{ "role": "user", "content": { "type": "text", "text": "Screen interaction: 1) screenshot. 2) Identify coordinates. 3) mouse_click or type_text. 4) verify_action_result. 5) screenshot again if needed." } }]),
+        "batch_device_check" => json!([{ "role": "user", "content": { "type": "text", "text": "Check multiple devices: 1) list_peers. 2) For each: connect_to_peer, wait_for_event, exec_operation 'get_system_info'. 3) disconnect_peer. 4) Compile summary." } }]),
+        _ => {
+            return json!({ "jsonrpc": "2.0", "error": { "code": -32602, "message": format!("Unknown prompt: {}", name) } });
+        }
+    };
+    json!({ "jsonrpc": "2.0", "result": { "description": format!("Prompt: {}", name), "messages": messages } })
+}
+
+fn handle_resources_list() -> Value {
+    json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "resources": [
+                { "uri": "hoptodesk://device/info", "name": "Device Info", "description": "Device ID, version, platform, hostname, and signal server status", "mimeType": "application/json" },
+                { "uri": "hoptodesk://device/config", "name": "Device Configuration", "description": "HopToDesk configuration: device ID, dashboard enrollment, options", "mimeType": "application/json" },
+                { "uri": "hoptodesk://device/peers", "name": "Known Peers", "description": "List of known peers from recent sessions, favorites, and LAN discovery", "mimeType": "application/json" },
+                { "uri": "hoptodesk://device/connections", "name": "Active Connections", "description": "Currently active remote desktop connections", "mimeType": "application/json" }
+            ]
+        }
+    })
+}
+
+fn handle_resources_read(request: &Value) -> Value {
+    let uri = request["params"]["uri"].as_str().unwrap_or("");
+    let (content_text, mime) = match uri {
+        "hoptodesk://device/info" => {
+            let id = hbb_common::config::Config::get_id();
+            let version = env!("CARGO_PKG_VERSION");
+            let platform = std::env::consts::OS;
+            let hostname = crate::common::hostname();
+            let status = crate::ui_interface::get_connect_status();
+            let status_text = match status.status_num { 1 => "online", 0 => "connecting", _ => "offline" };
+            let info = json!({ "device_id": id, "version": version, "platform": platform, "hostname": hostname, "status": status_text, "status_num": status.status_num });
+            (serde_json::to_string_pretty(&info).unwrap_or_default(), "application/json")
+        },
+        "hoptodesk://device/config" => {
+            let id = hbb_common::config::Config::get_id();
+            let dashboard_user_id = hbb_common::config::Config::get_option("dashboard_user_id");
+            let config_dir = hbb_common::config::Config::path("").to_string_lossy().to_string();
+            let config = json!({ "device_id": id, "dashboard_user_id": if dashboard_user_id.is_empty() { Value::Null } else { Value::String(dashboard_user_id) }, "config_directory": config_dir, "version": env!("CARGO_PKG_VERSION"), "platform": std::env::consts::OS });
+            (serde_json::to_string_pretty(&config).unwrap_or_default(), "application/json")
+        },
+        "hoptodesk://device/peers" => {
+            let peers: Vec<Value> = PeerConfig::peers(None).into_iter().map(|(id, modified, config)| {
+                let last_seen = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                json!({ "id": id, "username": config.info.username, "hostname": config.info.hostname, "platform": config.info.platform, "last_seen_epoch": last_seen })
+            }).collect();
+            (serde_json::to_string_pretty(&peers).unwrap_or_default(), "application/json")
+        },
+        "hoptodesk://device/connections" => {
+            match tool_list_active_connections() {
+                Ok(content) => {
+                    let text = content.as_array().and_then(|arr| arr.first()).and_then(|c| c["text"].as_str()).unwrap_or("[]").to_string();
+                    (text, "application/json")
+                },
+                Err(e) => (format!("{{\"error\": \"{}\"}}", e), "application/json"),
+            }
+        },
+        _ => {
+            return json!({ "jsonrpc": "2.0", "error": { "code": -32602, "message": format!("Unknown resource URI: {}", uri) } });
+        }
+    };
+    json!({ "jsonrpc": "2.0", "result": { "contents": [{ "uri": uri, "mimeType": mime, "text": content_text }] } })
+}
+
+fn handle_roots_list() -> Value {
+    let mut roots = Vec::new();
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let path = std::path::PathBuf::from(home);
+        roots.push(json!({ "uri": format!("file://{}", path.to_string_lossy()), "name": "Home Directory" }));
+    }
+    let config_dir = hbb_common::config::Config::path("");
+    roots.push(json!({ "uri": format!("file://{}", config_dir.to_string_lossy()), "name": "HopToDesk Config" }));
+    let tmp = std::env::temp_dir();
+    roots.push(json!({ "uri": format!("file://{}", tmp.to_string_lossy()), "name": "Temp Directory" }));
+    json!({ "jsonrpc": "2.0", "result": { "roots": roots } })
 }
 
 fn handle_tools_list() -> Value {

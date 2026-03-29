@@ -458,7 +458,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("Minimize", "Minimizar"),
         ("Maximize", "Maximizar"),
         ("Your Device", "Seu Dispositivo"),
-        ("empty_recent_tip", "Tutaj będą wyświetlane ostatnie sesje."),
+        ("empty_recent_tip", "As sessões recentes serão exibidas aqui."),
         ("empty_favorite_tip", "Os colegas favoritos serão exibidos aqui."),
         ("empty_lan_tip", "Os pares descobertos serão exibidos aqui."),
         ("empty_address_book_tip", "No momento, não há pares listados em seu catálogo de endereços."),
@@ -883,5 +883,10 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
 
         ("Device", "Dispositivo"),
         ("WoL must be enabled in the device's BIOS/UEFI settings", "O WoL deve estar habilitado nas configurações de BIOS/UEFI do dispositivo"),
+        ("Are you sure you want to delete", "Tem certeza de que deseja excluir"),
+        ("Please enter a local port number", "Digite um número de porta local"),
+        ("Please enter a remote port number", "Digite um número de porta remota"),
+        ("Please enter local and remote port numbers", "Digite os números de porta local e remota"),
+        ("Copy", "Copiar"),
     ].iter().cloned().collect();
 }

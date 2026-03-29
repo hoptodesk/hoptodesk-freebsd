@@ -1,0 +1,12 @@
+[package]
+name = "tfc-interpreter"
+version = "0.1.0"
+authors = ["Indiana Kernick <indiana.kernick@gmail.com>"]
+edition = "2021"
+repository = "https://github.com/indianakernick/The-Fat-Controller"
+homepage = "https://github.com/indianakernick/The-Fat-Controller"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tfc = { version = "0.7", path = "../" }
+lazy_static = "1.4"

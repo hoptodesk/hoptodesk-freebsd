@@ -883,5 +883,10 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
 
         ("Device", "裝置"),
         ("WoL must be enabled in the device's BIOS/UEFI settings", "必須在裝置的 BIOS/UEFI 設定中啟用 WoL"),
+        ("Are you sure you want to delete", "您確定要刪除嗎"),
+        ("Please enter a local port number", "請輸入本機連接埠號碼"),
+        ("Please enter a remote port number", "請輸入遠端連接埠號碼"),
+        ("Please enter local and remote port numbers", "請輸入本機和遠端連接埠號碼"),
+        ("Copy", "複製"),
     ].iter().cloned().collect();
 }

@@ -11,8 +11,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+use hbb_common::proxy;
 use tokio_rustls::rustls::{self, ClientConfig as TlsClientConfig, OwnedTrustAnchor};
-use tokio_socks::tcp::Socks5Stream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turn::client::{tcp::TcpTurn, ClientConfig, TlsConfig};
 use webrtc_util::conn::Conn;
@@ -325,20 +325,10 @@ pub struct TurnClient {
 
 impl TurnClient {
     pub async fn new(config: TurnConfig) -> ResultType<Self> {
-        // Connect to TURN server - either directly or through SOCKS5 proxy
+        // Connect to TURN server - either directly or through proxy
         let stream = if let Some(conf) = Config::get_socks() {
-            log::info!("[turn] Connecting to TURN server via SOCKS5 proxy: {}", config.addr);
-            let socks_stream = if conf.username.trim().is_empty() {
-                Socks5Stream::connect(conf.proxy.as_str(), config.addr.as_str()).await?
-            } else {
-                Socks5Stream::connect_with_password(
-                    conf.proxy.as_str(),
-                    config.addr.as_str(),
-                    &conf.username,
-                    &conf.password,
-                ).await?
-            };
-            socks_stream.into_inner()
+            log::info!("[turn] Connecting to TURN server via proxy: {}", config.addr);
+            proxy::connect_via_proxy(&conf, &config.addr, 10_000).await?
         } else {
             TcpStream::connect(&config.addr).await?
         };
@@ -358,12 +348,23 @@ impl TurnClient {
         if Config::get_socks().is_some() {
             tcp_turn.set_peer_addr(turn_server_addr);
         }
-        // Pass SOCKS5 proxy config to TURN client for sub-connections (CONNECTION_ATTEMPT)
+        // Pass proxy config to TURN client for sub-connections (CONNECTION_ATTEMPT)
         let socks5_proxy = Config::get_socks().map(|conf| {
-            turn::client::Socks5ProxyConfig {
+            let resolved_type = match conf.proxy_type {
+                hbb_common::config::ProxyType::Http => turn::client::ProxyType::Http,
+                hbb_common::config::ProxyType::Socks5 => turn::client::ProxyType::Socks5,
+                hbb_common::config::ProxyType::Auto => {
+                    match proxy::get_resolved_proxy_type() {
+                        Some(hbb_common::config::ProxyType::Http) => turn::client::ProxyType::Http,
+                        _ => turn::client::ProxyType::Socks5,
+                    }
+                }
+            };
+            turn::client::ProxyConfig {
                 proxy: conf.proxy,
                 username: conf.username,
                 password: conf.password,
+                proxy_type: resolved_type,
             }
         });
         let mut client = turn::client::Client::new(ClientConfig {

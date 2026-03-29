@@ -18,6 +18,7 @@ use crate::{
     CodecFormat, EncodeInput, EncodeYuvFormat, ImageRgb, ImageTexture,
 };
 
+#[allow(unused_imports)]
 use hbb_common::{
     anyhow::anyhow,
     bail,

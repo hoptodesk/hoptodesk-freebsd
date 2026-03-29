@@ -885,5 +885,10 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
 		
         ("Device", "Устройство"),
         ("WoL must be enabled in the device's BIOS/UEFI settings", "WoL трябва да е активиран в настройките на BIOS/UEFI на устройството"),
+        ("Are you sure you want to delete", "Сигурни ли сте, че искате да изтриете"),
+        ("Please enter a local port number", "Моля, въведете номер на локален порт"),
+        ("Please enter a remote port number", "Моля, въведете номер на отдалечен порт"),
+        ("Please enter local and remote port numbers", "Моля, въведете номера на локалния и отдалечения порт"),
+        ("Copy", "Копиране"),
     ].iter().cloned().collect();
 }

@@ -8,7 +8,6 @@ use hbb_common::{
     config::Config,
     log, ResultType,
 };
-use tokio_socks::tcp::Socks5Stream;
 use tokio_tungstenite::Connector::NativeTls;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 
@@ -54,31 +53,12 @@ pub(crate) async fn create_websocket_(
     use hbb_common::tokio;
     use std::time::Duration;
 
-    // Establish TCP connection - either directly or through SOCKS5 proxy
+    // Establish TCP connection - either directly or through proxy
     let socket = if let Some(conf) = Config::get_socks() {
-        log::info!("Connecting to signal server via SOCKS5 proxy: {}", host);
-        let socks_stream = if conf.username.trim().is_empty() {
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                Socks5Stream::connect(conf.proxy.as_str(), host),
-            )
-            .await?
-            .map_err(|e| anyhow!("SOCKS5 connection failed: {}", e))?
-        } else {
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                Socks5Stream::connect_with_password(
-                    conf.proxy.as_str(),
-                    host,
-                    &conf.username,
-                    &conf.password,
-                ),
-            )
-            .await?
-            .map_err(|e| anyhow!("SOCKS5 connection failed: {}", e))?
-        };
-        // After SOCKS5 handshake, the underlying TcpStream is a tunnel to the target
-        socks_stream.into_inner()
+        log::info!("Connecting to signal server via proxy: {}", host);
+        hbb_common::proxy::connect_via_proxy(&conf, host, 10_000)
+            .await
+            .map_err(|e| anyhow!("Proxy connection failed: {}", e))?
     } else {
         log::info!("Resolving Signal server {}", host);
         let addr = host

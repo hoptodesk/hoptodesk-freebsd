@@ -6,10 +6,12 @@ use std::{io, sync::RwLock, time::Duration};
 
 use super::x11::PixelBuffer;
 
+#[allow(dead_code)]
 pub struct Capturer(Display, Box<dyn Recorder>, Vec<u8>);
 
 
 lazy_static::lazy_static! {
+    #[allow(dead_code)]
     static ref MAP_ERR: RwLock<Option<fn(err: String)-> io::Error>> = Default::default();
 }
 

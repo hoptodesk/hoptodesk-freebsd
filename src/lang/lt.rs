@@ -883,5 +883,10 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
 
         ("Device", "Įrenginys"),
         ("WoL must be enabled in the device's BIOS/UEFI settings", "WoL turi būti įjungtas įrenginio BIOS/UEFI nustatymuose"),
+        ("Are you sure you want to delete", "Ar tikrai norite ištrinti"),
+        ("Please enter a local port number", "Įveskite vietinio prievado numerį"),
+        ("Please enter a remote port number", "Įveskite nuotolinio prievado numerį"),
+        ("Please enter local and remote port numbers", "Įveskite vietinio ir nuotolinio prievadų numerius"),
+        ("Copy", "Kopijuoti"),
     ].iter().cloned().collect();
 }

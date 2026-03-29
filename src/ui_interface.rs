@@ -550,6 +550,7 @@ pub fn get_socks() -> Vec<String> {
                 v.push(s.proxy);
                 v.push(s.username);
                 v.push(s.password);
+                v.push(s.proxy_type.as_str().to_string());
                 v
             }
         }
@@ -558,17 +559,18 @@ pub fn get_socks() -> Vec<String> {
 
 #[inline]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub fn set_socks(proxy: String, username: String, password: String) {
+pub fn set_socks(proxy: String, username: String, password: String, proxy_type: String) {
     ipc::set_socks(config::Socks5Server {
         proxy,
         username,
         password,
+        proxy_type: config::ProxyType::from_str(&proxy_type),
     })
     .ok();
 }
 
 #[cfg(any(target_os = "android", target_os = "ios"))]
-pub fn set_socks(_: String, _: String, _: String) {}
+pub fn set_socks(_: String, _: String, _: String, _: String) {}
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[inline]

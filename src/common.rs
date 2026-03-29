@@ -953,15 +953,11 @@ pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
 }
 */
 
-/// Build an HTTP client that routes through the SOCKS5 proxy when configured.
+/// Build an HTTP client that routes through the proxy when configured.
 pub fn make_http_client() -> reqwest::Client {
     let mut builder = reqwest::Client::builder();
     if let Some(conf) = config::Config::get_socks() {
-        let proxy_url = if !conf.username.is_empty() {
-            format!("socks5://{}:{}@{}", conf.username, conf.password, conf.proxy)
-        } else {
-            format!("socks5://{}", conf.proxy)
-        };
+        let proxy_url = hbb_common::proxy::proxy_url(&conf);
         if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
             builder = builder.proxy(proxy);
         }
@@ -1001,14 +997,10 @@ pub async fn post_request(url: String, body: String, header: &str) -> ResultType
             data.push("-H");
             data.push(header);
         }
-        // Add SOCKS5 proxy to curl if configured
+        // Add proxy to curl if configured
         let socks_arg;
         if let Some(conf) = config::Config::get_socks() {
-            socks_arg = if !conf.username.is_empty() {
-                format!("socks5://{}:{}@{}", conf.username, conf.password, conf.proxy)
-            } else {
-                format!("socks5://{}", conf.proxy)
-            };
+            socks_arg = hbb_common::proxy::proxy_url(&conf);
             data.push("--proxy");
             data.push(&socks_arg);
         }

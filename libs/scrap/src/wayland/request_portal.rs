@@ -5,6 +5,7 @@ use dbus;
 use dbus::arg;
 use dbus::blocking;
 
+#[allow(dead_code)]
 pub trait OrgFreedesktopPortalRequest {
   fn close(&self) -> Result<(), dbus::Error>;
 }

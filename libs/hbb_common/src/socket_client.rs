@@ -58,7 +58,7 @@ pub fn test_if_valid_server(host: &str) -> String {
             Err(err) => err.to_string(),
             Ok(_) => "".to_owned(),
         },
-        NetworkType::ProxySocks => match &host.into_target_addr() {
+        NetworkType::ProxySocks | NetworkType::ProxyHttp => match &host.into_target_addr() {
             Err(err) => err.to_string(),
             Ok(_) => "".to_owned(),
         },

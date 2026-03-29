@@ -113,8 +113,15 @@ pub fn is_headless_allowed() -> bool {
 
 #[inline]
 pub fn is_login_screen_wayland() -> bool {
-    let values = get_values_of_seat0_with_gdm_wayland(&[0, 2]);
-    is_gdm_user(&values[1]) && get_display_server_of_session(&values[0]) == DISPLAY_SERVER_WAYLAND
+    #[cfg(target_os = "freebsd")]
+    {
+        return false; // FreeBSD doesn't use loginctl/gdm
+    }
+    #[cfg(not(target_os = "freebsd"))]
+    {
+        let values = get_values_of_seat0_with_gdm_wayland(&[0, 2]);
+        is_gdm_user(&values[1]) && get_display_server_of_session(&values[0]) == DISPLAY_SERVER_WAYLAND
+    }
 }
 
 #[inline]
@@ -774,21 +781,28 @@ fn get_cm() -> bool {
 }
 
 pub fn is_login_wayland() -> bool {
-    let files = ["/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"];
-    match (
-        Regex::new(r"# *WaylandEnable *= *false"),
-        Regex::new(r"WaylandEnable *= *true"),
-    ) {
-        (Ok(pat1), Ok(pat2)) => {
-            for file in files {
-                if let Ok(contents) = std::fs::read_to_string(file) {
-                    return pat1.is_match(&contents) || pat2.is_match(&contents);
+    #[cfg(target_os = "freebsd")]
+    {
+        return false; // FreeBSD doesn't use GDM/Wayland login
+    }
+    #[cfg(not(target_os = "freebsd"))]
+    {
+        let files = ["/etc/gdm3/custom.conf", "/etc/gdm/custom.conf"];
+        match (
+            Regex::new(r"# *WaylandEnable *= *false"),
+            Regex::new(r"WaylandEnable *= *true"),
+        ) {
+            (Ok(pat1), Ok(pat2)) => {
+                for file in files {
+                    if let Ok(contents) = std::fs::read_to_string(file) {
+                        return pat1.is_match(&contents) || pat2.is_match(&contents);
+                    }
                 }
             }
+            _ => {}
         }
-        _ => {}
+        false
     }
-    false
 }
 
 #[inline]
@@ -797,12 +811,28 @@ pub fn current_is_wayland() -> bool {
 }
 
 fn _get_display_manager() -> String {
-    if let Ok(x) = std::fs::read_to_string("/etc/X11/default-display-manager") {
-        if let Some(x) = x.split("/").last() {
-            return x.to_owned();
+    #[cfg(target_os = "freebsd")]
+    {
+        // Check common FreeBSD display managers
+        for dm in &["slim", "lightdm", "sddm", "gdm", "xdm"] {
+            let check = format!("sysrc -n {}_enable 2>/dev/null", dm);
+            if let Ok(val) = run_cmds(&check) {
+                if val.trim() == "YES" {
+                    return dm.to_string();
+                }
+            }
         }
+        return "slim".to_owned();
     }
-    "gdm3".to_owned()
+    #[cfg(not(target_os = "freebsd"))]
+    {
+        if let Ok(x) = std::fs::read_to_string("/etc/X11/default-display-manager") {
+            if let Some(x) = x.split("/").last() {
+                return x.to_owned();
+            }
+        }
+        "gdm3".to_owned()
+    }
 }
 
 #[inline]
@@ -1179,6 +1209,9 @@ fn get_envs<'a>(
 
 #[inline]
 fn get_env(name: &str, uid: &str, process: &str) -> String {
+    #[cfg(target_os = "freebsd")]
+    let cmd = format!("ps -U {} -o pid,comm | grep -E '{}' | grep -v 'grep' | tail -1 | awk '{{print $1}}' | xargs -I__ procstat -e __ 2>/dev/null | grep '{}=' | sed 's/.*{}=//;s/ .*//'", uid, process, name, name);
+    #[cfg(not(target_os = "freebsd"))]
     let cmd = format!("ps -u {} -f | grep -E '{}' | grep -v 'grep' | tail -1 | awk '{{print $2}}' | xargs -I__ cat /proc/__/environ 2>/dev/null | tr '\\0' '\\n' | grep '^{}=' | tail -1 | sed 's/{}=//g'", uid, process, name, name);
     if let Ok(x) = run_cmds(&cmd) {
         x.trim_end().to_string()
@@ -1189,6 +1222,9 @@ fn get_env(name: &str, uid: &str, process: &str) -> String {
 
 #[inline]
 fn get_env_from_pid(name: &str, pid: &str) -> String {
+    #[cfg(target_os = "freebsd")]
+    let cmd = format!("procstat -e {} 2>/dev/null | grep '{}=' | sed 's/.*{}=//;s/ .*//'", pid, name, name);
+    #[cfg(not(target_os = "freebsd"))]
     let cmd = format!("cat /proc/{}/environ 2>/dev/null | tr '\\0' '\\n' | grep '^{}=' | tail -1 | sed 's/{}=//g'", pid, name, name);
     if let Ok(x) = run_cmds(&cmd) {
         x.trim_end().to_string()
@@ -1758,6 +1794,9 @@ fn has_cmd(cmd: &str) -> bool {
 }
 
 pub fn run_cmds_privileged(cmds: &str) -> bool {
+    if unsafe { hbb_common::libc::getuid() } == 0 {
+        return run_cmds(cmds).is_ok();
+    }
     crate::platform::gtk_sudo::run(vec![cmds]).is_ok()
 }
 

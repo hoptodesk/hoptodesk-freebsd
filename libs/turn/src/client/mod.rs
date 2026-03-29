@@ -12,6 +12,7 @@ use self::tcp::{TcpTurn, MaybeTlsStream, ConnectionID};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls::ClientConfig as TlsClientConfig;
 use tokio_rustls::rustls::ServerName;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_socks::tcp::Socks5Stream;
 
 use std::io;
@@ -66,12 +67,21 @@ pub struct TlsConfig {
     pub domain: ServerName,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProxyType {
+    Socks5,
+    Http,
+}
+
 #[derive(Debug, Clone)]
-pub struct Socks5ProxyConfig {
+pub struct ProxyConfig {
     pub proxy: String,
     pub username: String,
     pub password: String,
+    pub proxy_type: ProxyType,
 }
+
+pub type Socks5ProxyConfig = ProxyConfig;
 
 // ClientConfig is a bag of config parameters for Client.
 pub struct ClientConfig {
@@ -412,19 +422,50 @@ impl ClientInternal {
 
                 let tcp_stream = if let Some(ref proxy) = socks5_proxy {
                     let target = from.to_string();
-                    let socks_stream = if proxy.username.trim().is_empty() {
-                        Socks5Stream::connect(proxy.proxy.as_str(), target.as_str()).await
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
-                    } else {
-                        Socks5Stream::connect_with_password(
-                            proxy.proxy.as_str(),
-                            target.as_str(),
-                            &proxy.username,
-                            &proxy.password,
-                        ).await
-                            .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
-                    };
-                    socks_stream.into_inner()
+                    match proxy.proxy_type {
+                        ProxyType::Http => {
+                            let stream = TcpStream::connect(proxy.proxy.as_str()).await
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                            stream.set_nodelay(true).ok();
+                            let connect_req = if proxy.username.is_empty() {
+                                format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\n\r\n", target, target)
+                            } else {
+                                let creds = BASE64_STANDARD.encode(format!("{}:{}", proxy.username, proxy.password));
+                                format!("CONNECT {} HTTP/1.1\r\nHost: {}\r\nProxy-Authorization: Basic {}\r\n\r\n", target, target, creds)
+                            };
+                            let (mut reader, mut writer) = stream.into_split();
+                            writer.write_all(connect_req.as_bytes()).await
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                            let mut buf = vec![0u8; 4096];
+                            let n = reader.read(&mut buf).await
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?;
+                            if n == 0 {
+                                return Err(io::Error::new(io::ErrorKind::Other, "HTTP CONNECT: proxy closed connection").into());
+                            }
+                            let response = String::from_utf8_lossy(&buf[..n]);
+                            let first_line = response.lines().next().unwrap_or("");
+                            if !first_line.contains("200") {
+                                return Err(io::Error::new(io::ErrorKind::Other, format!("HTTP CONNECT failed: {}", first_line)).into());
+                            }
+                            reader.reunite(writer)
+                                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                        }
+                        ProxyType::Socks5 => {
+                            let socks_stream = if proxy.username.trim().is_empty() {
+                                Socks5Stream::connect(proxy.proxy.as_str(), target.as_str()).await
+                                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                            } else {
+                                Socks5Stream::connect_with_password(
+                                    proxy.proxy.as_str(),
+                                    target.as_str(),
+                                    &proxy.username,
+                                    &proxy.password,
+                                ).await
+                                    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))?
+                            };
+                            socks_stream.into_inner()
+                        }
+                    }
                 } else {
                     TcpStream::connect(from.clone()).await?
                 };

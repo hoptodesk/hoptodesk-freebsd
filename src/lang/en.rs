@@ -231,7 +231,7 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("network_error_tip", "Please check your network connection, then click retry."),
         ("enable-trusted-devices-tip", "Skip 2FA verification on trusted devices"),
         ("one-way-file-transfer-tip", "One-way file transfer is enabled on the controlled side."),
-        ("View camera", "View camera"),
+        ("View Camera", "View Camera"),
         ("view_camera_unsupported_tip", "The remote device does not support viewing the camera."),
         ("d3d_render_tip", "When D3D rendering is enabled, the remote control screen may be black on some machines."),
         ("printer-requires-installed-{}-client-tip", "In order to use remote printing, {} needs to be installed on this device."),
@@ -362,6 +362,10 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("doc_mac_permission", ""),
         ("exceeds 5MB limit. Please choose a smaller file.", "exceeds 5MB limit. Please choose a smaller file."),
         ("via", "via"),
-
+        ("Are you sure you want to delete", "Are you sure you want to delete"),
+        ("Please enter a local port number", "Please enter a local port number"),
+        ("Please enter a remote port number", "Please enter a remote port number"),
+        ("Please enter local and remote port numbers", "Please enter local and remote port numbers"),
+        ("Copy", "Copy"),
     ].iter().cloned().collect();
 }
