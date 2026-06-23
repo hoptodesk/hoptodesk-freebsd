@@ -50,61 +50,48 @@ pub fn generate_service_id() -> String {
     format!("ts_{}", uuid::Uuid::new_v4())
 }
 
-/*
 fn get_default_shell() -> String {
     #[cfg(target_os = "windows")]
     {
-        // Try PowerShell Core first (cross-platform version)
-        // Common installation paths for PowerShell Core
         let pwsh_paths = [
             "pwsh.exe",
             r"C:\Program Files\PowerShell\7\pwsh.exe",
             r"C:\Program Files\PowerShell\6\pwsh.exe",
         ];
-
         for path in &pwsh_paths {
             if std::path::Path::new(path).exists() {
                 return path.to_string();
             }
         }
-
-        // Try Windows PowerShell (should be available on all Windows systems)
         let powershell_path = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe";
         if std::path::Path::new(powershell_path).exists() {
             return powershell_path.to_string();
         }
-
-        // Final fallback to cmd.exe
         std::env::var("COMSPEC").unwrap_or_else(|_| "cmd.exe".to_string())
     }
     #[cfg(not(target_os = "windows"))]
     {
-        // First try the SHELL environment variable
         if let Ok(shell) = std::env::var("SHELL") {
             if !shell.is_empty() {
                 return shell;
             }
         }
-
-        // Check for common shells in order of preference
         let shells = ["/bin/bash", "/bin/zsh", "/bin/sh"];
         for shell in &shells {
             if std::path::Path::new(shell).exists() {
                 return shell.to_string();
             }
         }
-
-        // Final fallback to /bin/sh which should exist on all POSIX systems
         "/bin/sh".to_string()
     }
-}*/
+}
 
 pub fn is_service_specified_user(service_id: &str) -> Option<bool> {
     get_service(service_id).map(|s| s.lock().unwrap().is_specified_user)
 }
 
 /// Get or create a persistent terminal service
-fn get_or_create_service(
+pub fn get_or_create_service(
     service_id: String,
     is_persistent: bool,
     is_specified_user: bool,
@@ -699,12 +686,9 @@ impl TerminalServiceProxy {
         service: &mut PersistentTerminalService,
         open: &OpenTerminal,
     ) -> Result<Option<TerminalResponse>> {
-        Ok(None)
-		/*let mut response = TerminalResponse::new();
+        let mut response = TerminalResponse::new();
 
-        // Check if terminal already exists
         if let Some(session_arc) = service.sessions.get(&open.terminal_id) {
-            // Reconnect to existing terminal
             let mut session = session_arc.lock().unwrap();
             session.is_opened = true;
             let mut opened = TerminalOpened::new();
@@ -715,8 +699,6 @@ impl TerminalServiceProxy {
             opened.service_id = self.service_id.clone();
             if service.needs_session_sync {
                 if service.sessions.len() > 1 {
-                    // No need to include the current terminal in the list.
-                    // Because the `persistent_sessions` is used to restore the other sessions.
                     opened.persistent_sessions = service
                         .sessions
                         .keys()
@@ -727,18 +709,9 @@ impl TerminalServiceProxy {
                 service.needs_session_sync = false;
             }
             response.set_opened(opened);
-
-            // Send buffered output
-            let buffer = session.output_buffer.get_recent(4096);
-            if !buffer.is_empty() {
-                // We'll need to send this separately or extend the protocol
-                // For now, just acknowledge the reconnection
-            }
-
             return Ok(Some(response));
         }
 
-        // Create new terminal session
         log::info!(
             "Creating new terminal {} for service: {}",
             open.terminal_id,
@@ -758,12 +731,12 @@ impl TerminalServiceProxy {
         let pty_system = portable_pty::native_pty_system();
         let pty_pair = pty_system.openpty(pty_size).context("Failed to open PTY")?;
 
-        // Use default shell for the platform
         let shell = get_default_shell();
         log::debug!("Using shell: {}", shell);
 
         #[allow(unused_mut)]
         let mut cmd = CommandBuilder::new(&shell);
+        cmd.env("TERM", "xterm-256color");
 
         #[cfg(target_os = "windows")]
         if let Some(token) = &self.user_token {
@@ -788,64 +761,38 @@ impl TerminalServiceProxy {
 
         session.pid = child.process_id().unwrap_or(0) as u32;
 
-        // Create channels for input/output
         let (input_tx, input_rx) = mpsc::sync_channel::<Vec<u8>>(CHANNEL_BUFFER_SIZE);
         let (output_tx, output_rx) = mpsc::sync_channel::<Vec<u8>>(CHANNEL_BUFFER_SIZE);
 
-        // Spawn writer thread
         let terminal_id = open.terminal_id;
         let writer_thread = thread::spawn(move || {
             let mut writer = writer;
-            // Write initial carriage return:
-            // 1. Windows requires at least one carriage return for `drop()` to work properly.
-            //    Without this, the reader may fail to read the buffer after `input_tx.send(b"\r\n".to_vec()).ok();`.
-            // 2. This also refreshes the terminal interface on the controlling side (workaround for blank content on connect).
-            if let Err(e) = writer.write_all(b"\r") {
-                log::error!("Terminal {} initial write error: {}", terminal_id, e);
-            } else {
-                if let Err(e) = writer.flush() {
-                    log::error!("Terminal {} initial flush error: {}", terminal_id, e);
-                }
-            }
             while let Ok(data) = input_rx.recv() {
                 if let Err(e) = writer.write_all(&data) {
                     log::error!("Terminal {} write error: {}", terminal_id, e);
                     break;
                 }
-                if let Err(e) = writer.flush() {
-                    log::error!("Terminal {} flush error: {}", terminal_id, e);
-                }
+                let _ = writer.flush();
             }
             log::debug!("Terminal {} writer thread exiting", terminal_id);
         });
 
         let exiting = session.exiting.clone();
-        // Spawn reader thread
         let terminal_id = open.terminal_id;
         let reader_thread = thread::spawn(move || {
             let mut reader = reader;
             let mut buf = vec![0u8; 4096];
             loop {
                 match reader.read(&mut buf) {
-                    Ok(0) => {
-                        // EOF
-                        // This branch can be reached when the child process exits on macOS.
-                        // But not on Linux and Windows in my tests.
-                        break;
-                    }
+                    Ok(0) => break,
                     Ok(n) => {
                         if exiting.load(Ordering::SeqCst) {
                             break;
                         }
-                        let data = buf[..n].to_vec();
-                        // Try to send, if channel is full, drop the data
-                        match output_tx.try_send(data) {
+                        match output_tx.try_send(buf[..n].to_vec()) {
                             Ok(_) => {}
                             Err(mpsc::TrySendError::Full(_)) => {
-                                log::debug!(
-                                    "Terminal {} output channel full, dropping data",
-                                    terminal_id
-                                );
+                                log::debug!("Terminal {} output channel full, dropping data", terminal_id);
                             }
                             Err(mpsc::TrySendError::Disconnected(_)) => {
                                 log::debug!("Terminal {} output channel disconnected", terminal_id);
@@ -854,11 +801,9 @@ impl TerminalServiceProxy {
                         }
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        // This branch is not reached in my tests, but we still add `exiting` check to ensure we can exit.
                         if exiting.load(Ordering::SeqCst) {
                             break;
                         }
-                        // For non-blocking I/O, sleep briefly
                         thread::sleep(Duration::from_millis(10));
                     }
                     Err(e) => {
@@ -898,12 +843,11 @@ impl TerminalServiceProxy {
             session.pid
         );
 
-        // Store the session
         service
             .sessions
             .insert(open.terminal_id, Arc::new(Mutex::new(session)));
 
-        Ok(Some(response))*/
+        Ok(Some(response))
     }
 
     fn handle_resize(

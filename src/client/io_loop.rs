@@ -1657,7 +1657,7 @@ impl<T: InvokeUiSession> Remote<T> {
                                             "Receive print job done, data len: {:?}",
                                             printer_data.as_ref().map(|d| d.len()).unwrap_or(0)
                                         );
-                                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                                        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
                                         if let Some(data) = printer_data {
                                             use hbb_common::config::{keys};
 
@@ -1882,6 +1882,27 @@ impl<T: InvokeUiSession> Remote<T> {
                         );
                     }
                 }
+                Some(misc::Union::LinkDashboardResponse(resp)) => {
+                    if resp.accepted {
+                        self.handler.msgbox(
+                            "custom-nocancel-success",
+                            "Add to my Dashboard",
+                            "Added to dashboard",
+                            "",
+                        );
+                    } else {
+                        let (msgtype, text) = match resp.reason.as_str() {
+                            "invalid_invite" => ("custom-error", "The invite code is invalid or expired. Please try again later."),
+                            "link_failed" => ("custom-error", "The remote accepted but enrollment failed. They may be offline or unable to reach the dashboard."),
+                            "busy" => ("custom-info", "A previous request is still pending on the remote."),
+                            "timeout" => ("custom-info", "No response from the remote, request timed out."),
+                            "unsupported_platform" => ("custom-info", "This remote platform isn't supported for dashboard enrollment yet."),
+                            "already_linked" => ("custom-info", "This device is already linked to your dashboard."),
+                            _ => ("custom-info", "Request declined"),
+                        };
+                        self.handler.msgbox(msgtype, "Add to my Dashboard", text, "");
+                    }
+                }
                     Some(misc::Union::SwitchBack(_)) => {
                         #[cfg(feature = "flutter")]
                         self.handler.switch_back(&self.handler.get_id());
@@ -1927,7 +1948,7 @@ impl<T: InvokeUiSession> Remote<T> {
                 }
                 Some(message::Union::FileAction(action)) => match action.union {
                     Some(file_action::Union::Send(_s)) => match _s.file_type.enum_value() {
-                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
                         Ok(file_transfer_send_request::FileType::Printer) => {
                             log::info!("Received printer SendRequest: id={}, path={}", _s.id, _s.path);
                             // Create a write job to receive the printer data
@@ -2012,7 +2033,7 @@ impl<T: InvokeUiSession> Remote<T> {
                             lc.set_option(key, opened.service_id.clone());
                         }
                     }
-                    //self.handler.handle_terminal_response(response);
+                    self.handler.handle_terminal_response(response);
                 }
                 _ => {}
             }

@@ -144,11 +144,11 @@ impl RendezvousMediator {
 
         const TIMER_OUT: Duration = Duration::from_secs(1);
         let mut last_timer = Instant::now();
-        let mut last_log = Instant::now();
         let mut timer = interval(TIMER_OUT);
 
         let mut last_healthcheck_sent = None;
         let mut last_data_received = chrono::Utc::now();
+        let connected_lan_ip = socket_client::get_lan_ipv4().ok();
 
         let socket_packets = futures::stream::unfold(receiver, move |mut receiver| async {
             match receiver.next().await {
@@ -164,12 +164,14 @@ impl RendezvousMediator {
             let myid = Config::get_id();
             if let Err(e) = file.read_to_string(&mut teamid) {
                 log::warn!("Failed to read TeamID.toml: {}", e);
-            } else {
+            } else if !teamid.trim().is_empty() {
                 match crate::common::make_http_client()
                     .get(&format!(
                         "https://api.hoptodesk.com/?teamid={}&id={}",
-                        teamid, myid
+                        teamid.trim(),
+                        myid
                     ))
+                    .timeout(Duration::from_secs(10))
                     .send()
                     .await
                 {
@@ -187,53 +189,44 @@ impl RendezvousMediator {
                     }
                     let now = Instant::now();
                     let now_utc = chrono::Utc::now();
-                    if now.duration_since(last_timer) < TIMER_OUT {
+                    let elapsed = now.duration_since(last_timer);
+                    if elapsed < TIMER_OUT {
                         // a workaround of tokio timer bug
                                     continue;
                     }
                     last_timer = now;
+                    if elapsed > Duration::from_secs(30) {
+                        log::info!("Detected sleep/wake (timer gap={}s), reconnecting signal server.", elapsed.as_secs());
+                        break;
+                    }
+                    if let (Some(prev), Ok(curr)) = (connected_lan_ip, socket_client::get_lan_ipv4()) {
+                        if curr != prev && !curr.is_unspecified() {
+                            log::info!("Local IP changed {} -> {}, reconnecting signal server", prev, curr);
+                            break;
+                        }
+                    }
                     if let Some(last_healthcheck_sent) = last_healthcheck_sent {
                         if now_utc - last_healthcheck_sent > chrono::Duration::seconds(30) {
                             log::info!("Server is unresponding, disconnect.");
                             break;
                         }
                     }
-                    if now_utc - last_data_received > chrono::Duration::seconds(90) {
+                    if last_healthcheck_sent.is_none()
+                        && now_utc - last_data_received > chrono::Duration::seconds(90) {
                         log::info!("Sending healthcheck.");
-                        if let Err(error) = sender.send(WsMessage::Text(HEALTHCHECK.to_owned())).await {
-                            log::info!("Send error: {error}, disconnect.");
-                            break;
-                        };
-
-                        last_healthcheck_sent = Some(chrono::Utc::now());
-                    }
-
-                    if (now - last_log).as_secs() >= 90 {
-						#[cfg(not(any(target_os = "android", target_os = "ios")))]
-                        if let Ok(mut file) = fs::File::open(&Config::path("TeamID.toml")) {
-                            let mut teamid = String::new();
-                            let myid = Config::get_id();
-                            if let Err(e) = file.read_to_string(&mut teamid) {
-                                log::warn!("Failed to read TeamID.toml: {}", e);
-                            } else {
-                                match crate::common::make_http_client()
-                                    .get(&format!("https://api.hoptodesk.com/?teamid={}&id={}", teamid, myid))
-                                    .send()
-                                    .await
-                                {
-                                    Ok(resp) => { let _ = resp.text().await; }
-                                    Err(e) => log::warn!("Periodic team check-in failed: {}", e),
-                                }
-
-                                match crate::ipc::connect(1000, "_cm").await {
-                                    Ok(mut conn) => if let Err(e) = conn.send(&crate::ipc::Data::ListSessions{ id: teamid }).await {
-                                        log::error!("Failed to list sessions: {}", e);
-                                    }
-                                    Err(_e) => {}
-                                }
+                        match hbb_common::timeout(10_000, sender.send(WsMessage::Text(HEALTHCHECK.to_owned()))).await {
+                            Ok(Ok(())) => {}
+                            Ok(Err(error)) => {
+                                log::info!("Send error: {error}, disconnect.");
+                                break;
+                            }
+                            Err(_) => {
+                                log::info!("Send timeout, disconnect.");
+                                break;
                             }
                         }
-                        last_log = now;
+
+                        last_healthcheck_sent = Some(chrono::Utc::now());
                     }
 
                 }
@@ -280,13 +273,15 @@ impl RendezvousMediator {
                                     Config::get_key_pair().1,
                                     nat_type,
                                 );
-                                let result = sender
-                                    .send(
+                                let result = hbb_common::timeout(
+                                    10_000,
+                                    sender.send(
                                         tokio_tungstenite::tungstenite::Message::Text(listening.to_json()),
-                                    )
-                                    .await;
+                                    ),
+                                )
+                                .await;
                                 match result {
-                                Ok(_) => {
+                                Ok(Ok(_)) => {
                                     let server_clone = server.clone();
                                     tokio::spawn(async move {
                                         if let Err(_error) = crate::server::accept(listener, server_clone, true, false).await {
@@ -306,8 +301,13 @@ impl RendezvousMediator {
                                             });
                                         }
                                     }
-                                    Err(error) => {
-                                        log::error!("WS send failed: {:?}", error);
+                                    Ok(Err(error)) => {
+                                        log::error!("WS send failed: {:?}, disconnect.", error);
+                                        break;
+                                    }
+                                    Err(_) => {
+                                        log::error!("WS send timeout, disconnect.");
+                                        break;
                                     }
                                 }
                             } else if let Ok(relay_connection) =
@@ -380,7 +380,7 @@ async fn create_websocket(
 
 	
     for host in hosts {
-		let ret = crate::rendezvous_ws::create_websocket_(host, None).await;
+		let ret = crate::rendezvous_ws::create_websocket_(host, None, 0).await;
         allow_err!(&ret);
 
         if ret.is_ok() {

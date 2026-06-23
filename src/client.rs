@@ -56,7 +56,6 @@ use hbb_common::{
     bail,
     config::{
     	self, keys, Config, LocalConfig, PeerConfig, PeerInfoSerde, Resolution, CONNECT_TIMEOUT,
-    	RENDEZVOUS_TIMEOUT,
     },
     fs::JobType,
     get_version_number, log,
@@ -203,7 +202,7 @@ struct Peer {
 }
 
 impl Peer {
-    fn from_peer_id(peer_id: &str) -> ResultType<Self> {
+    async fn from_peer_id(peer_id: &str) -> ResultType<Self> {
         let local_addr = socket_client::get_lan_ipv4()?;
         let id_pk = Vec::new();
         let is_ipv6 = hbb_common::is_ipv6_str(peer_id);
@@ -211,21 +210,17 @@ impl Peer {
         let peer_public_addr = peer_addr;
         let peer_nat_type = NatType::UNKNOWN_NAT;
         if peer_addr.port() == 0 {
-            if let Ok(pa) = peer_id.parse() {
+            let normalized = socket_client::check_port(peer_id, 21118);
+            if let Ok(pa) = normalized.parse() {
                 peer_addr = pa;
-            } else {
-                // For IPv6 addresses, wrap in brackets for proper SocketAddr parsing
-                let peer_sock_addr = if is_ipv6 {
-                    format!("[{}]:21118", peer_id.trim_matches(|c| c == '[' || c == ']'))
+            } else if let Ok(mut addrs) = tokio::net::lookup_host(&normalized).await {
+                if let Some(addr) = addrs.next() {
+                    peer_addr = addr;
                 } else {
-                    format!("{}:21118", peer_id)
-                };
-                if let Ok(pa) = peer_sock_addr.parse() {
-                    peer_addr = pa
-                } else {
-                    //bail!("Unable to connect to the remote partner.");
-					log::warn!("cant connect directly with addr {}, will try relay", peer_addr);
+                    log::warn!("cant connect directly with addr {}, will try relay", peer_addr);
                 }
+            } else {
+                log::warn!("cant connect directly with addr {}, will try relay", peer_addr);
             }
         }
 
@@ -285,8 +280,9 @@ impl Peer {
                 let n = if direct_failures > 0 { 3 } else { 6 };
                 connect_timeout = self.listening_time_used * (n as u64);
             }
-            if connect_timeout < MIN {
-                connect_timeout = MIN;
+            const MIN_REMOTE: u64 = 2500;
+            if connect_timeout < MIN_REMOTE {
+                connect_timeout = MIN_REMOTE;
             }
             // Cap timeout to prevent excessive waits when signal server is slow
             if connect_timeout > CONNECT_TIMEOUT {
@@ -349,7 +345,7 @@ impl Client {
 
 		if is_ip {
 			log::info!("peer_id is an IP address, connecting directly without fetching peer info");
-			let peer = Peer::from_peer_id(peer_id)?;
+			let peer = Peer::from_peer_id(peer_id).await?;
 			let mut conn = Self::connect_directly(peer_id, &peer).await?;
 			let (security_numbers, avatar_image) =
 				Self::secure_connection(peer_id, peer.id_pk, &mut conn).await?;
@@ -369,7 +365,7 @@ impl Client {
 				}
 				Err(err) => {
 					log::info!("get_peer_info failed with error: {}, may be no internet access, try access directly.", err);
-					let peer = Peer::from_peer_id(peer_id)?;
+					let peer = Peer::from_peer_id(peer_id).await?;
 					let mut conn = Self::connect_directly(peer_id, &peer).await?;
 					let (security_numbers, avatar_image) =
 						Self::secure_connection(peer_id, peer.id_pk, &mut conn).await?;
@@ -389,15 +385,53 @@ async fn _connect_both(
     let peer_id = peer_id.to_owned();
     let peer_c = peer.clone();
 
-    let direct_fut = Self::connect_directly(&peer_id, &peer_c);
-    let turn_fut = Self::connect_over_turn(&peer_id, sender.clone(), peer_c.peer_public_addr);
+    let force_relay = config::option2bool(
+        "force-always-relay",
+        PeerConfig::load(&peer_id)
+            .options
+            .get("force-always-relay")
+            .map(|x| x.as_str())
+            .unwrap_or_default(),
+    );
+    if force_relay {
+        log::info!("force-always-relay enabled for this peer, skipping direct connection");
+        let (conn, relay) =
+            Self::connect_over_turn(&peer_id, sender.clone(), peer_c.peer_public_addr).await?;
+        return Ok((conn, Some(relay), false));
+    }
 
+    let has_direct_candidate = peer_c.peer_lan_ipv4.map_or(false, |a| a.port() != 0)
+        || peer_c.peer_addr.port() != 0
+        || peer_c.peer_public_addr.port() != 0;
+    let turn_delay = if has_direct_candidate {
+        Duration::from_millis(1000)
+    } else {
+        Duration::ZERO
+    };
+
+    let direct_fut = Self::connect_directly(&peer_id, &peer_c);
     tokio::pin!(direct_fut);
-    tokio::pin!(turn_fut);
 
     let mut direct_done = false;
-    let mut turn_done = false;
     let mut direct_result = None;
+
+    tokio::select! {
+        result = &mut direct_fut => {
+            if result.is_ok() {
+                let mut sender = sender.lock().await;
+                let _ = sender.close().await;
+                return result.map(|s| (s, None, true));
+            }
+            direct_done = true;
+            direct_result = Some(result);
+        }
+        _ = tokio::time::sleep(turn_delay) => {}
+    }
+
+    let turn_fut = Self::connect_over_turn(&peer_id, sender.clone(), peer_c.peer_public_addr);
+    tokio::pin!(turn_fut);
+
+    let mut turn_done = false;
     let mut turn_result = None;
 
     loop {
@@ -445,17 +479,21 @@ async fn _connect_both(
             None => bail!("Failed to retrieve signal server address"),
         };
 
-        let my_peer_id = std::time::SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            .to_string();
-        let start = std::time::Instant::now();
+        let my_peer_id = format!(
+            "v-{}-{:08x}",
+            std::time::SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            hbb_common::rand::random::<u32>(),
+        );
         //log::info!("get peer info via signal {}", rendezvous_server);
+        let mut conn_attempt = 0usize;
         let (my_addr, _, websocket_client) =
-            crate::rendezvous_ws::create_websocket_with_peer_id(&rendezvous_server, &my_peer_id)
+            crate::rendezvous_ws::create_websocket_with_peer_id(&rendezvous_server, &my_peer_id, conn_attempt)
                 .await?;
         let (mut sender, mut receiver) = websocket_client.split();
+        let start = std::time::Instant::now();
 
         let mut id_pk = Vec::new();
         let mut peer_addr = Config::get_any_listen_addr(true);
@@ -467,9 +505,10 @@ async fn _connect_both(
         let mut ws_dead = false;
         for _i in 1..=3 {
             if ws_dead {
+                conn_attempt += 1;
                 log::info!("#{} WebSocket dead, reconnecting to signal server...", _i);
                 match crate::rendezvous_ws::create_websocket_with_peer_id(
-                    &rendezvous_server, &my_peer_id
+                    &rendezvous_server, &my_peer_id, conn_attempt
                 ).await {
                     Ok((_new_addr, _, new_ws)) => {
                         let (new_sender, new_receiver) = new_ws.split();
@@ -496,7 +535,7 @@ async fn _connect_both(
                 continue;
             }
             use hbb_common::protobuf::Enum;
-            match timeout(RENDEZVOUS_TIMEOUT, receiver.next()).await {
+            match timeout(3_000, receiver.next()).await {
                 Ok(Some(r)) => {
                     let msg = r?;
                     if let WsMessage::Text(m) = msg {
@@ -526,21 +565,25 @@ async fn _connect_both(
                     log::info!("#{} signal server connection closed, will reconnect", _i);
                     ws_dead = true;
                 }
-                Err(_) => log::info!("#{} punch attempt timed out, retrying...", _i),
+                Err(_) => {
+                    log::info!("#{} punch attempt timed out, rotating signal node...", _i);
+                    ws_dead = true;
+                }
             }
         }
-        if peer_addr.port() == 0 {
+        if peer_addr.port() == 0 && !id_pk.is_empty() {
             log::info!("get_peer_info, peer_addr.port = 0");
-			if let Ok(pa) = peer.parse() {
+            let normalized = socket_client::check_port(peer, 21118);
+            if let Ok(pa) = normalized.parse() {
                 peer_addr = pa;
-            } else {
-                let peer_sock_addr = format!("{}:21118", peer);
-                if let Ok(pa) = peer_sock_addr.parse() {
-                    peer_addr = pa
+            } else if let Ok(mut addrs) = tokio::net::lookup_host(&normalized).await {
+                if let Some(addr) = addrs.next() {
+                    peer_addr = addr;
                 } else {
                     log::info!("cant connect to {} with addr {}", peer, peer_addr);
-                    //bail!("Unable to connect to the remote partner.");
                 }
+            } else {
+                log::info!("cant connect to {} with addr {}", peer, peer_addr);
             }
         }
         let time_used = start.elapsed().as_millis() as u64;
@@ -611,7 +654,7 @@ async fn _connect_both(
         }
         if peer.peer_public_addr.port() != 0 && !addrs_to_try.contains(&peer.peer_public_addr) {
             if peer.is_local() {
-                log::info!("LAN peer, skipping public address");
+                addrs_to_try.push(peer.peer_public_addr);
             } else {
                 #[cfg(not(target_os = "ios"))]
                 let same_network = match turn_client::get_public_ip().await {
@@ -647,9 +690,16 @@ async fn _connect_both(
             .map(|&addr| {
                 async move {
                     let result = socket_client::connect_tcp(addr, connect_timeout).await;
+                    let truncated_ip = match addr.ip() {
+                        IpAddr::V4(v4) => {
+                            let o = v4.octets();
+                            format!("{}.{}.{}", o[0], o[1], o[2])
+                        }
+                        IpAddr::V6(_) => addr.ip().to_string(),
+                    };
                     match &result {
-                        Ok(_) => log::info!("Connected successfully to {} directly!", addr),
-                        Err(e) => log::warn!("Direct connection to {} failed: {}", addr, e),
+                        Ok(_) => log::info!("Connected successfully to {} directly!", truncated_ip),
+                        Err(e) => log::warn!("Direct connection to {} failed: {}", truncated_ip, e),
                     }
                     result
                 }
@@ -766,7 +816,34 @@ async fn _connect_both(
             },
             Some(sign_pk) => {               
                 log::info!("Start secure connection");              
-                if let Ok((id, their_pk_b)) = decode_id_pk(&signed_id.id, &sign_pk) {
+                let mut sign_pk = sign_pk;
+                let mut decoded = decode_id_pk(&signed_id.id, &sign_pk);
+                if decoded.is_err() {
+                    log::warn!("signal pk did not verify signed_id; requesting peer's current pk");
+                    let mut req = Message::new();
+                    set_direct_initial_public_key_request(&mut req);
+                    if timeout(CONNECT_TIMEOUT, conn.send(&req)).await.is_ok() {
+                        if let Ok(Some(Ok(bytes))) = timeout(CONNECT_TIMEOUT, conn.next()).await {
+                            if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
+                                if let Some(message::Union::Misc(Misc {
+                                    union: Some(misc::Union::UnauthenticatedInitialPublicKeyResponse(ref resp, ..)),
+                                    ..
+                                })) = msg_in.union {
+                                    if resp.unauthenticated_initial_public_key.len() == sign::PUBLICKEYBYTES {
+                                        let mut fresh = [0u8; sign::PUBLICKEYBYTES];
+                                        fresh[..].copy_from_slice(&resp.unauthenticated_initial_public_key);
+                                        sign_pk = sign::PublicKey(fresh);
+                                        decoded = decode_id_pk(&signed_id.id, &sign_pk);
+                                        if decoded.is_ok() {
+                                            log::info!("verified signed_id with peer-provided pk");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if let Ok((id, their_pk_b)) = decoded {
                     if id == peer_id {
                         let their_pk_b = box_::PublicKey(their_pk_b);
                         let (our_pk_b, out_sk_b) = box_::gen_keypair();
@@ -788,11 +865,10 @@ async fn _connect_both(
                         conn.send(&Message::new()).await?;
                     }
                 } else {
-                    // fall back to non-secure connection in case pk mismatch
-                    log::info!("pk mismatch, fall back to non-secure");
                     let mut msg_out = Message::new();
                     msg_out.set_public_key(PublicKey::new());
-                    timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await??;
+                    let _ = timeout(CONNECT_TIMEOUT, conn.send(&msg_out)).await;
+                    bail!("encrypted handshake failed: peer identity could not be verified");
                 }
                 Ok((security_numbers, avatar_image))
             }
@@ -936,6 +1012,7 @@ async fn _connect_both(
             }
             Err(e) => {
                 let synthesized_peer = Peer::from_peer_id(peer_id_to_invite)
+                    .await
                     .map_err(|synth_err| anyhow!("Failed to synthesize peer info for direct connection after get_peer_info failed for {}: {} (original error: {})", peer_id_to_invite, synth_err, e))?;
 
                 let mut stream = Self::connect_directly(peer_id_to_invite, &synthesized_peer).await
@@ -2632,6 +2709,10 @@ impl LoginConfigHandler {
                 port: self.port_forward.1,
                 ..Default::default()
             }),
+            ConnType::TERMINAL => lr.set_terminal(Terminal {
+                service_id: self.get_option("terminal-service-id").to_owned(),
+                ..Default::default()
+            }),
             _ => {}
         }
 
@@ -3570,9 +3651,6 @@ pub trait Interface: Send + Clone + 'static + Sized {
                 || (!err.contains("Failed") && err.contains("deadline")))
         {
             lc.write().unwrap().force_relay = true;
-            lc.write()
-                .unwrap()
-                .set_option("force-always-relay".to_owned(), "Y".to_owned());
         }
 
         // relay-hint

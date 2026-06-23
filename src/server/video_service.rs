@@ -771,7 +771,8 @@ fn run(vs: VideoService) -> ResultType<()> {
                     would_block_count += 1;
                     if !is_x11() {
                         if would_block_count >= 100 {
-
+                            std::thread::sleep(spf);
+                            would_block_count = 0;
                         }
                     }
                 }

@@ -698,7 +698,23 @@ impl Config {
             "".into()
         }
     }
-    
+
+    pub fn shared_path<P: AsRef<Path>>(p: P) -> PathBuf {
+        #[cfg(windows)]
+        {
+            let app_name = APP_NAME.read().unwrap().clone();
+            let base = std::env::var("PROGRAMDATA")
+                .unwrap_or_else(|_| "C:\\ProgramData".to_string());
+            let mut path = PathBuf::from(format!("{}\\{}\\config", base, app_name));
+            path.push(p);
+            path
+        }
+        #[cfg(not(windows))]
+        {
+            Self::path(p)
+        }
+    }
+
     #[allow(unreachable_code)]
     pub fn log_path() -> PathBuf {
         #[cfg(target_os = "macos")]
@@ -2307,7 +2323,9 @@ pub fn is_disable_installation() -> bool {
 // flutter: flutter/lib/common.dart -> option2bool()
 // sciter: Does not have the function, but it should be kept the same.
 pub fn option2bool(option: &str, value: &str) -> bool {
-    if option.starts_with("enable-") {
+    if option == "enable-terminal" {
+        value == "Y"
+    } else if option.starts_with("enable-") {
         value != "N"
     } else if option.starts_with("allow-")
         || option == "stop-service"

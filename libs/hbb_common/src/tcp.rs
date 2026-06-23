@@ -160,6 +160,24 @@ impl FramedStream {
         bail!("could not resolve to any address");
     }
 
+    pub async fn connect_via_proxy(
+        conf: &crate::config::Socks5Server,
+        target: &str,
+        _local_addr: Option<SocketAddr>,
+        ms_timeout: u64,
+    ) -> ResultType<Self> {
+        let stream = crate::proxy::connect_via_proxy(conf, target, ms_timeout).await?;
+        stream.set_nodelay(true).ok();
+        let addr = stream.local_addr()?;
+        Ok(Self(
+            Framed::new(DynTcpStream(Box::new(stream)), BytesCodec::new()),
+            addr,
+            None,
+            0,
+            None,
+        ))
+    }
+
     pub fn local_addr(&self) -> SocketAddr {
         self.1
     }

@@ -1,4 +1,3 @@
-use std::net::ToSocketAddrs;
 
 use hbb_common::tokio::net::TcpStream;
 use hbb_common::{
@@ -6,14 +5,158 @@ use hbb_common::{
     anyhow::anyhow,
     bail,
     config::Config,
-    log, ResultType,
+    lazy_static, log, ResultType,
 };
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 use tokio_tungstenite::Connector::NativeTls;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
+
+const DNS_CACHE_TTL: Duration = Duration::from_secs(300);
+
+lazy_static::lazy_static! {
+    static ref DNS_CACHE: Mutex<HashMap<String, (Vec<SocketAddr>, Instant)>> = Default::default();
+}
+
+async fn resolve_host_cached(host: &str) -> ResultType<(Vec<SocketAddr>, bool)> {
+    use hbb_common::tokio;
+    if let Some((addrs, resolved_at)) = DNS_CACHE.lock().unwrap().get(host).cloned() {
+        if resolved_at.elapsed() < DNS_CACHE_TTL {
+            return Ok((addrs, true));
+        }
+    }
+    let addrs: Vec<_> = tokio::net::lookup_host(host).await?.collect();
+    if addrs.is_empty() {
+        log::info!("Error: Cannot resolve dns for the host");
+        bail!("Cannot resolve dns for the host");
+    }
+    DNS_CACHE
+        .lock()
+        .unwrap()
+        .insert(host.to_owned(), (addrs.clone(), Instant::now()));
+    Ok((addrs, false))
+}
+
+async fn connect_first(addrs: &[SocketAddr], attempt: usize) -> Option<TcpStream> {
+    use hbb_common::tokio;
+    let count = addrs.len();
+    for i in 0..count {
+        let addr = addrs[(attempt + i) % count];
+        match tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr)).await {
+            Ok(Ok(stream)) => return Some(stream),
+            Ok(Err(e)) => log::info!("Signal server {} connect failed: {}", addr, e),
+            Err(_) => log::info!("Signal server {} connect timed out", addr),
+        }
+    }
+    None
+}
+
+const KEEPALIVE_IDLE_SECS: hbb_common::libc::c_int = 30;
+const KEEPALIVE_INTVL_SECS: hbb_common::libc::c_int = 10;
+#[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", target_os = "ios"))]
+const KEEPALIVE_PROBES: hbb_common::libc::c_int = 3;
+
+fn set_aggressive_keepalive(socket: &TcpStream) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let fd = socket.as_raw_fd();
+        let on: hbb_common::libc::c_int = 1;
+        unsafe {
+            hbb_common::libc::setsockopt(
+                fd,
+                hbb_common::libc::SOL_SOCKET,
+                hbb_common::libc::SO_KEEPALIVE,
+                &on as *const _ as *const hbb_common::libc::c_void,
+                std::mem::size_of_val(&on) as hbb_common::libc::socklen_t,
+            );
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            hbb_common::libc::setsockopt(
+                fd,
+                hbb_common::libc::IPPROTO_TCP,
+                hbb_common::libc::TCP_KEEPIDLE,
+                &KEEPALIVE_IDLE_SECS as *const _ as *const hbb_common::libc::c_void,
+                std::mem::size_of_val(&KEEPALIVE_IDLE_SECS) as hbb_common::libc::socklen_t,
+            );
+            #[cfg(any(target_os = "macos", target_os = "ios"))]
+            hbb_common::libc::setsockopt(
+                fd,
+                hbb_common::libc::IPPROTO_TCP,
+                hbb_common::libc::TCP_KEEPALIVE,
+                &KEEPALIVE_IDLE_SECS as *const _ as *const hbb_common::libc::c_void,
+                std::mem::size_of_val(&KEEPALIVE_IDLE_SECS) as hbb_common::libc::socklen_t,
+            );
+            #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos", target_os = "ios"))]
+            {
+                hbb_common::libc::setsockopt(
+                    fd,
+                    hbb_common::libc::IPPROTO_TCP,
+                    hbb_common::libc::TCP_KEEPINTVL,
+                    &KEEPALIVE_INTVL_SECS as *const _ as *const hbb_common::libc::c_void,
+                    std::mem::size_of_val(&KEEPALIVE_INTVL_SECS) as hbb_common::libc::socklen_t,
+                );
+                hbb_common::libc::setsockopt(
+                    fd,
+                    hbb_common::libc::IPPROTO_TCP,
+                    hbb_common::libc::TCP_KEEPCNT,
+                    &KEEPALIVE_PROBES as *const _ as *const hbb_common::libc::c_void,
+                    std::mem::size_of_val(&KEEPALIVE_PROBES) as hbb_common::libc::socklen_t,
+                );
+            }
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::mem::size_of;
+        use std::os::windows::io::AsRawSocket;
+        #[repr(C)]
+        struct TcpKeepalive {
+            onoff: u32,
+            keepalivetime: u32,
+            keepaliveinterval: u32,
+        }
+        const SIO_KEEPALIVE_VALS: u32 = 0x98000004;
+        extern "system" {
+            fn WSAIoctl(
+                s: usize,
+                dwIoControlCode: u32,
+                lpvInBuffer: *const std::ffi::c_void,
+                cbInBuffer: u32,
+                lpvOutBuffer: *mut std::ffi::c_void,
+                cbOutBuffer: u32,
+                lpcbBytesReturned: *mut u32,
+                lpOverlapped: *mut std::ffi::c_void,
+                lpCompletionRoutine: *mut std::ffi::c_void,
+            ) -> i32;
+        }
+        let vals = TcpKeepalive {
+            onoff: 1,
+            keepalivetime: (KEEPALIVE_IDLE_SECS as u32) * 1000,
+            keepaliveinterval: (KEEPALIVE_INTVL_SECS as u32) * 1000,
+        };
+        let mut bytes_returned: u32 = 0;
+        unsafe {
+            WSAIoctl(
+                socket.as_raw_socket() as usize,
+                SIO_KEEPALIVE_VALS,
+                &vals as *const _ as *const std::ffi::c_void,
+                size_of::<TcpKeepalive>() as u32,
+                std::ptr::null_mut(),
+                0,
+                &mut bytes_returned,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            );
+        }
+    }
+}
 
 pub(crate) async fn create_websocket_with_peer_id(
     host_list: &str,
     my_peer_id: &str,
+    attempt: usize,
 ) -> ResultType<(
     std::net::IpAddr,
     String,
@@ -21,7 +164,7 @@ pub(crate) async fn create_websocket_with_peer_id(
 )> {
 	let hosts = host_list.split(';');
     for host in hosts {
-        let ret = create_websocket_(host, Some(my_peer_id.to_owned())).await;
+        let ret = create_websocket_(host, Some(my_peer_id.to_owned()), attempt).await;
         allow_err!(&ret);
 
         if ret.is_ok() {
@@ -35,6 +178,7 @@ pub(crate) async fn create_websocket_with_peer_id(
 pub(crate) async fn create_websocket_(
     host: &str,
     my_peer_id: Option<String>,
+    attempt: usize,
 ) -> ResultType<(
     std::net::IpAddr,
     String,
@@ -50,9 +194,6 @@ pub(crate) async fn create_websocket_(
 
     let host = split[1];
 
-    use hbb_common::tokio;
-    use std::time::Duration;
-
     // Establish TCP connection - either directly or through proxy
     let socket = if let Some(conf) = Config::get_socks() {
         log::info!("Connecting to signal server via proxy: {}", host);
@@ -61,40 +202,20 @@ pub(crate) async fn create_websocket_(
             .map_err(|e| anyhow!("Proxy connection failed: {}", e))?
     } else {
         log::info!("Resolving Signal server {}", host);
-        let addr = host
-            .to_socket_addrs()?
-            .next()
-            .ok_or_else(|| {
-                let error_msg = anyhow!("Cannot resolve dns for the host");
-                log::info!("Error: {}", error_msg);
-                error_msg
-            })?;
-
-        tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(addr))
-            .await?
-            .map_err(|_| anyhow!("TCP connection timed out"))?
+        let (addrs, from_cache) = resolve_host_cached(host).await?;
+        let mut connected = connect_first(&addrs, attempt).await;
+        if connected.is_none() && from_cache {
+            DNS_CACHE.lock().unwrap().remove(host);
+            let (addrs, _) = resolve_host_cached(host).await?;
+            connected = connect_first(&addrs, attempt).await;
+        }
+        match connected {
+            Some(stream) => stream,
+            None => bail!("Failed to connect to any resolved address for {}", host),
+        }
     };
 
-    {
-        #[cfg(unix)]
-        {
-            use std::os::unix::io::AsRawFd;
-            use std::os::unix::io::{FromRawFd, IntoRawFd};
-            let raw_fd = socket.as_raw_fd();
-            let sock2 = unsafe { hbb_common::socket2::Socket::from_raw_fd(raw_fd) };
-            let _ = sock2.set_keepalive(Some(Duration::from_secs(30)));
-            let _ = sock2.into_raw_fd(); // release ownership back to TcpStream
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::io::AsRawSocket;
-            use std::os::windows::io::{FromRawSocket, IntoRawSocket};
-            let raw_socket = socket.as_raw_socket();
-            let sock2 = unsafe { hbb_common::socket2::Socket::from_raw_socket(raw_socket) };
-            let _ = sock2.set_keepalive(Some(Duration::from_secs(30)));
-            let _ = sock2.into_raw_socket(); // release ownership back to TcpStream
-        }
-    }
+    set_aggressive_keepalive(&socket);
 
 
 	let local_ip = socket.local_addr().unwrap().ip();
@@ -104,11 +225,11 @@ pub(crate) async fn create_websocket_(
     }
     let scheme = split[0];
 	let uri = format!("{}://{}/?user={}", scheme, host, peer_id);
-    //Ignore invalid certificate
+    let allow_invalid_certs = !Config::get_option("custom-rendezvous-server").is_empty();
     let tls_opts = Some(NativeTls(
         native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
-            .danger_accept_invalid_hostnames(true)
+            .danger_accept_invalid_certs(allow_invalid_certs)
+            .danger_accept_invalid_hostnames(allow_invalid_certs)
 			.use_sni(false)
             .build()?,
     ));

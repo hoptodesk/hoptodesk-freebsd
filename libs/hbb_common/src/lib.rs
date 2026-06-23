@@ -255,13 +255,21 @@ pub fn gen_version() {
             break;
         }
     }
-    // generate build date
-    let build_date = format!("{}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
-    file.write_all(
-        format!("#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{build_date}\";\n").as_bytes(),
-    )
-    .ok();
+    file.write_all(b"include!(concat!(env!(\"OUT_DIR\"), \"/build_date.rs\"));\n")
+        .ok();
     file.sync_all().ok();
+
+    let build_date = format!("{}", chrono::Local::now().format("%Y-%m-%d %H:%M"));
+    let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set by cargo");
+    let build_date_path = Path::new(&out_dir).join("build_date.rs");
+    let mut bd_file = File::create(&build_date_path).unwrap();
+    bd_file
+        .write_all(
+            format!("#[allow(dead_code)]\npub const BUILD_DATE: &str = \"{build_date}\";\n")
+                .as_bytes(),
+        )
+        .ok();
+    bd_file.sync_all().ok();
 }
 
 fn read_lines<P>(filename: P) -> io::Result<io::Lines<io::BufReader<File>>>
@@ -428,6 +436,27 @@ pub fn init_log(_is_async: bool, _name: &str) -> Option<flexi_logger::LoggerHand
                     .ok();
             }
         }
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            let location = info
+                .location()
+                .map(|l| format!("{}:{}", l.file(), l.line()))
+                .unwrap_or_else(|| "<unknown>".into());
+            let msg = info
+                .payload()
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| {
+                    info.payload()
+                        .downcast_ref::<String>()
+                        .map(|s| s.as_str())
+                })
+                .unwrap_or("<no message>");
+            let thread = std::thread::current();
+            let thread_name = thread.name().unwrap_or("<unnamed>");
+            log::error!("PANIC at {} on thread '{}': {}", location, thread_name, msg);
+            prev_hook(info);
+        }));
     });
     logger_holder
 }

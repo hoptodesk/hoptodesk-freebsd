@@ -11,6 +11,7 @@ use hbb_common::{
 
 use crate::{
     client::*,
+    ui::terminal_emulator::{build_update_payload, TerminalEmulator},
     ui_session_interface::{InvokeUiSession, Session},
 };
 
@@ -145,6 +146,45 @@ pub fn start_file_command_watcher() {
 #[derive(Clone, Default)]
 pub struct SciterHandler {
     close_state: HashMap<String, String>,
+    terminals: Arc<Mutex<HashMap<i32, TerminalEmulator>>>,
+}
+
+impl SciterHandler {
+    fn feed_terminal(&self, id: i32, bytes: &[u8]) {
+        let mut map = self.terminals.lock().unwrap();
+        let emu = map.entry(id).or_insert_with(|| TerminalEmulator::new(24, 80));
+        let update = emu.feed(bytes);
+        let payload = build_update_payload(&update);
+        drop(map);
+        self.dispatch_terminal_update(id, &update, payload);
+    }
+
+    fn drop_terminal(&self, id: i32) {
+        self.terminals.lock().unwrap().remove(&id);
+    }
+
+    pub fn resize_terminal(&self, id: i32, rows: u16, cols: u16) {
+        let mut map = self.terminals.lock().unwrap();
+        let emu = map.entry(id).or_insert_with(|| TerminalEmulator::new(rows, cols));
+        emu.resize(rows, cols);
+        let update = emu.set_view(0);
+        let payload = build_update_payload(&update);
+        drop(map);
+        self.dispatch_terminal_update(id, &update, payload);
+    }
+
+    fn dispatch_terminal_update(
+        &self,
+        id: i32,
+        update: &crate::ui::terminal_emulator::FrameUpdate,
+        payload: String,
+    ) {
+        send_to_remote_webview("terminalUpdate", &format!(
+            "{{\"id\":{},\"rows\":{},\"cur_r\":{},\"cur_c\":{},\"cur_vis\":{},\"app_cursor\":{},\"bracketed_paste\":{},\"full\":{}}}",
+            id, payload, update.cursor_row, update.cursor_col, update.cursor_visible,
+            update.app_cursor_keys, update.bracketed_paste, update.full_repaint
+        ));
+    }
 }
 
 impl InvokeUiSession for SciterHandler {
@@ -431,8 +471,8 @@ impl InvokeUiSession for SciterHandler {
         let sas_enabled = peer_info.sas_enabled;
         let num_displays = peer_info.displays.len();
         send_to_remote_webview("set_peer_info",
-            &format!("{{\"username\":\"{}\",\"hostname\":\"{}\",\"platform\":\"{}\",\"version\":\"{}\",\"sas_enabled\":{},\"num_displays\":{}}}",
-                escaped_user, escaped_host, escaped_platform, escaped_version, sas_enabled, num_displays));
+            &format!("{{\"username\":\"{}\",\"hostname\":\"{}\",\"platform\":\"{}\",\"version\":\"{}\",\"sas_enabled\":{},\"num_displays\":{},\"dashboard_linked\":{}}}",
+                escaped_user, escaped_host, escaped_platform, escaped_version, sas_enabled, num_displays, peer_info.dashboard_linked));
     }
 
     fn set_displays(&self, displays: &Vec<hbb_common::message_proto::DisplayInfo>) {
@@ -489,6 +529,37 @@ impl InvokeUiSession for SciterHandler {
         log::info!("[remote-wry] handle_screenshot_resp: {}", msg);
         let escaped = msg.replace('\\', "\\\\").replace('"', "\\\"");
         send_to_remote_webview("handle_screenshot_resp", &format!("\"{}\"", escaped));
+    }
+
+    fn handle_terminal_response(&self, resp: TerminalResponse) {
+        use hbb_common::message_proto::terminal_response::Union;
+        match resp.union {
+            Some(Union::Opened(opened)) => {
+                send_to_remote_webview("terminalOpened",
+                    &format!("{{\"id\":{},\"success\":{},\"message\":\"{}\"}}",
+                        opened.terminal_id, opened.success,
+                        opened.message.replace('\\', "\\\\").replace('"', "\\\"")));
+            }
+            Some(Union::Data(data)) => {
+                let output = if data.compressed {
+                    hbb_common::compress::decompress(&data.data)
+                } else {
+                    data.data.to_vec()
+                };
+                self.feed_terminal(data.terminal_id, &output);
+            }
+            Some(Union::Closed(closed)) => {
+                self.drop_terminal(closed.terminal_id);
+                send_to_remote_webview("terminalClosed",
+                    &format!("{{\"id\":{},\"exit_code\":{}}}", closed.terminal_id, closed.exit_code));
+            }
+            Some(Union::Error(error)) => {
+                send_to_remote_webview("terminalError",
+                    &format!("{{\"id\":{},\"message\":\"{}\"}}", error.terminal_id,
+                        error.message.replace('\\', "\\\\").replace('"', "\\\"")));
+            }
+            _ => {}
+        }
     }
 
 }

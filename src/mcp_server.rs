@@ -1,14 +1,13 @@
 use std::io::{self, BufRead, Write};
+use serde_json::{json, Value};
+use std::time::Duration;
 use std::time::Instant;
 use std::collections::HashMap;
 use std::sync::Mutex;
-use serde_json::{json, Value};
-use std::time::Duration;
-use lazy_static::lazy_static;
 use hbb_common::tokio;
 use hbb_common::config::PeerConfig;
+use lazy_static::lazy_static;
 
-// Workflow recording state
 struct WorkflowStep {
     tool_name: String,
     arguments: Value,
@@ -22,7 +21,7 @@ struct WorkflowState {
 }
 
 lazy_static! {
-    // Static storage for screen_diff_summary references (reference_id -> (rgba, width, height, created))
+
     static ref DIFF_REFS: Mutex<HashMap<String, (Vec<u8>, u32, u32, Instant)>> =
         Mutex::new(HashMap::new());
 
@@ -38,7 +37,15 @@ const SERVER_NAME: &str = "hoptodesk-mcp";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PROTOCOL_VERSION: &str = "2024-11-05";
 
-/// Stdio mode: reads JSON-RPC from stdin, writes to stdout
+fn parse_crop_region(args: &Value) -> Option<(i32, i32, i32, i32)> {
+    Some((
+        args["x"].as_i64()? as i32,
+        args["y"].as_i64()? as i32,
+        args["width"].as_i64()? as i32,
+        args["height"].as_i64()? as i32,
+    ))
+}
+
 pub fn run() {
     let stdin = io::stdin();
     let stdout = io::stdout();
@@ -60,8 +67,6 @@ pub fn run() {
     }
 }
 
-/// TCP mode: listens on localhost with token authentication.
-/// First line from each connection must be: {"auth":"TOKEN"}
 pub fn run_tcp(port: u16) {
     use std::net::TcpListener;
 
@@ -85,9 +90,10 @@ pub fn run_tcp(port: u16) {
                 continue;
             }
         };
-        let reader = io::BufReader::new(stream.try_clone().unwrap_or_else(|_| {
-            std::process::exit(1);
-        }));
+        let reader = io::BufReader::new(match stream.try_clone() {
+            Ok(s) => s,
+            Err(_) => continue,
+        });
         let mut writer = stream;
         let mut authenticated = false;
 
@@ -100,7 +106,7 @@ pub fn run_tcp(port: u16) {
             };
 
             if !authenticated {
-                // First line must be {"auth": "TOKEN"}
+
                 if let Ok(v) = serde_json::from_str::<Value>(&line) {
                     if v["auth"].as_str() == Some(&token) {
                         authenticated = true;
@@ -124,13 +130,10 @@ pub fn run_tcp(port: u16) {
     }
 }
 
-/// Public entry point for processing MCP requests from other modules (e.g. dashboard relay).
-/// Takes a JSON-RPC string, returns the response JSON string or None for notifications.
 pub fn handle_mcp_request(json_str: &str) -> Option<String> {
     process_line(json_str)
 }
 
-/// Process a single JSON-RPC line, return response string or None for notifications
 fn process_line(line: &str) -> Option<String> {
     let line = line.trim();
     if line.is_empty() {
@@ -175,9 +178,6 @@ fn process_line(line: &str) -> Option<String> {
     Some(serde_json::to_string(&resp).unwrap_or_default())
 }
 
-/// Local WebSocket MCP server (localhost-only, auth token required).
-/// Generates a random auth token printed to stderr. AI agents connect via
-/// ws://127.0.0.1:PORT, send {"auth":"TOKEN"} as first message, then JSON-RPC.
 #[tokio::main(flavor = "current_thread")]
 pub async fn run_ws_local(port: u16) {
     use hbb_common::tokio::net::TcpListener;
@@ -192,7 +192,6 @@ pub async fn run_ws_local(port: u16) {
         }
     };
 
-    // Generate random auth token
     let token = generate_auth_token();
 
     write_discovery_file(port, &token, "websocket");
@@ -235,7 +234,7 @@ pub async fn run_ws_local(port: u16) {
             };
 
             if !authenticated {
-                // First message must be {"auth": "TOKEN"}
+
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
                     if v["auth"].as_str() == Some(&token_clone) {
                         authenticated = true;
@@ -252,7 +251,6 @@ pub async fn run_ws_local(port: u16) {
                 break;
             }
 
-            // Authenticated — process MCP JSON-RPC
             if let Some(resp) = process_line(&text) {
                 if let Err(_) = ws_sender.send(WsMessage::Text(resp)).await {
                     break;
@@ -262,7 +260,6 @@ pub async fn run_ws_local(port: u16) {
     }
 }
 
-/// Generate a random 32-character alphanumeric auth token
 fn generate_auth_token() -> String {
     use hbb_common::rand::Rng;
     let mut rng = hbb_common::rand::thread_rng();
@@ -278,7 +275,6 @@ fn generate_auth_token() -> String {
         .collect()
 }
 
-/// Guard that deletes mcp.json when dropped (server shutdown).
 struct McpFileGuard;
 
 impl Drop for McpFileGuard {
@@ -291,9 +287,6 @@ impl Drop for McpFileGuard {
     }
 }
 
-/// Write a JSON discovery file (mcp.json) to the HopToDesk config directory
-/// (same dir as hoptodesk.toml). Contains connection info + auth token.
-/// Sets owner-only permissions (0600) on Unix.
 fn write_discovery_file(port: u16, token: &str, transport: &str) {
     let url = match transport {
         "websocket" => format!("ws://127.0.0.1:{}", port),
@@ -320,6 +313,14 @@ fn write_discovery_file(port: u16, token: &str, transport: &str) {
                 use std::os::unix::fs::PermissionsExt;
                 let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
             }
+
+            let _ = writeln!(
+                std::io::stderr(),
+                "HopToDesk MCP {} on {} — discovery file: {}",
+                transport,
+                url,
+                path.display()
+            );
         }
     }
 }
@@ -365,20 +366,56 @@ fn handle_prompts_list() -> Value {
 fn handle_prompts_get(request: &Value) -> Value {
     let name = request["params"]["name"].as_str().unwrap_or("");
     let messages = match name {
-        "device_health_check" => json!([{ "role": "user", "content": { "type": "text", "text": "Check this device's health. Use get_device_info for basic status, then exec_operation with 'get_system_info' for CPU/memory, 'disk_usage' for storage, and 'network_info' for connectivity. Summarize any issues found." } }]),
-        "automate_ui_task" => json!([{ "role": "user", "content": { "type": "text", "text": "To automate a UI task: 1) Take a screenshot to understand the current state. 2) Identify the target element's coordinates. 3) Use mouse_click or type_text to interact. 4) Use verify_action_result to confirm the action worked. 5) Repeat for each step." } }]),
-        "monitor_screen" => json!([{ "role": "user", "content": { "type": "text", "text": "Monitor a screen region for changes. Use screen_diff_summary to capture a baseline, then periodically call it again with the reference_id to check for changes." } }]),
-        "connect_and_verify" => json!([{ "role": "user", "content": { "type": "text", "text": "Connect to a remote peer: 1) Use list_peers to find the target device. 2) Use connect_to_peer with the peer_id. 3) Use wait_for_event with 'connection_ready'. 4) Use get_ui_state to verify. 5) Take a screenshot to confirm." } }]),
-        "diagnose_connection" => json!([{ "role": "user", "content": { "type": "text", "text": "Diagnose a connection issue: 1) Use get_device_info. 2) Use list_active_connections. 3) Use get_ui_state for quality metrics. 4) Use exec_operation with 'ping_test'. 5) Use exec_operation with 'network_info'. Report findings." } }]),
-        "file_operations" => json!([{ "role": "user", "content": { "type": "text", "text": "For file operations: 1) Use list_local_files to browse. 2) Use read_local_file for contents. 3) Use connect_to_peer with 'file-transfer'. 4) Use get_clipboard/set_clipboard for small transfers." } }]),
-        "run_maintenance" => json!([{ "role": "user", "content": { "type": "text", "text": "Run maintenance: 1) exec_operation 'get_system_info'. 2) exec_operation 'clear_temp_files'. 3) exec_operation 'run_update_check'. 4) exec_operation 'flush_dns'. 5) exec_operation 'restart_hoptodesk'." } }]),
-        "screen_interaction" => json!([{ "role": "user", "content": { "type": "text", "text": "Screen interaction: 1) screenshot. 2) Identify coordinates. 3) mouse_click or type_text. 4) verify_action_result. 5) screenshot again if needed." } }]),
-        "batch_device_check" => json!([{ "role": "user", "content": { "type": "text", "text": "Check multiple devices: 1) list_peers. 2) For each: connect_to_peer, wait_for_event, exec_operation 'get_system_info'. 3) disconnect_peer. 4) Compile summary." } }]),
+        "device_health_check" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Check this device's health. Use get_device_info for basic status, then exec_operation with 'get_system_info' for CPU/memory, 'disk_usage' for storage, and 'network_info' for connectivity. Summarize any issues found." }
+        }]),
+        "automate_ui_task" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "To automate a UI task: 1) Take a screenshot to understand the current state. 2) Identify the target element's coordinates. 3) Use mouse_click or type_text to interact. 4) Use verify_action_result to confirm the action worked. 5) Repeat for each step. Use wait_for_screen_change between steps to avoid acting too fast." }
+        }]),
+        "monitor_screen" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Monitor a screen region for changes. Use screen_diff_summary to capture a baseline, then periodically call it again with the reference_id to check for changes. Use wait_for_screen_change for event-driven monitoring with a specific region (x, y, width, height). Report what changed and where." }
+        }]),
+        "connect_and_verify" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Connect to a remote peer: 1) Use list_peers to find the target device. 2) Use connect_to_peer with the peer_id. 3) Use wait_for_event with 'connection_ready' to wait for video. 4) Use get_ui_state to verify toolbar, quality metrics, and permissions. 5) Take a screenshot to confirm the remote desktop is visible." }
+        }]),
+        "diagnose_connection" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Diagnose a connection issue: 1) Use get_device_info to check signal server status. 2) Use list_active_connections to see current sessions. 3) Use get_ui_state to check quality metrics (fps, delay, codec). 4) Use exec_operation with 'ping_test' to check network. 5) Use exec_operation with 'network_info' for interface details. Report findings and suggest fixes." }
+        }]),
+        "file_operations" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "For file operations: 1) Use list_local_files to browse directories. 2) Use read_local_file to read file contents (max 1MB). 3) For remote file transfer, use connect_to_peer with connection_type 'file-transfer'. 4) Use get_clipboard/set_clipboard for small text transfers between machines." }
+        }]),
+        "run_maintenance" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Run maintenance tasks: 1) exec_operation 'get_system_info' to check current state. 2) exec_operation 'clear_temp_files' to free disk space. 3) exec_operation 'run_update_check' to check for updates. 4) exec_operation 'flush_dns' if having DNS issues. 5) exec_operation 'restart_hoptodesk' if the service needs a refresh. Report results of each step." }
+        }]),
+        "screen_interaction" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "Best practice for screen interaction: 1) screenshot to see current state. 2) Identify target coordinates from the screenshot. 3) mouse_click or type_text to interact. 4) verify_action_result to confirm something changed. 5) screenshot again if needed. Use scroll to navigate long content. Use mouse_drag for selection or drag-and-drop. Use wait_for_screen_change to wait for animations/loading to complete before taking the next action." }
+        }]),
+        "batch_device_check" => json!([{
+            "role": "user",
+            "content": { "type": "text", "text": "To check multiple devices: 1) Use list_peers to get all known devices. 2) For each device, use connect_to_peer, wait_for_event 'connection_ready', then exec_operation 'get_system_info'. 3) disconnect_peer when done. 4) Compile a summary report of all device statuses. For dashboard-enrolled devices, the dashboard API can query device status without connecting." }
+        }]),
         _ => {
-            return json!({ "jsonrpc": "2.0", "error": { "code": -32602, "message": format!("Unknown prompt: {}", name) } });
+            return json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32602, "message": format!("Unknown prompt: {}", name) }
+            });
         }
     };
-    json!({ "jsonrpc": "2.0", "result": { "description": format!("Prompt: {}", name), "messages": messages } })
+    json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "description": format!("Prompt: {}", name),
+            "messages": messages
+        }
+    })
 }
 
 fn handle_resources_list() -> Value {
@@ -386,10 +423,30 @@ fn handle_resources_list() -> Value {
         "jsonrpc": "2.0",
         "result": {
             "resources": [
-                { "uri": "hoptodesk://device/info", "name": "Device Info", "description": "Device ID, version, platform, hostname, and signal server status", "mimeType": "application/json" },
-                { "uri": "hoptodesk://device/config", "name": "Device Configuration", "description": "HopToDesk configuration: device ID, dashboard enrollment, options", "mimeType": "application/json" },
-                { "uri": "hoptodesk://device/peers", "name": "Known Peers", "description": "List of known peers from recent sessions, favorites, and LAN discovery", "mimeType": "application/json" },
-                { "uri": "hoptodesk://device/connections", "name": "Active Connections", "description": "Currently active remote desktop connections", "mimeType": "application/json" }
+                {
+                    "uri": "hoptodesk://device/info",
+                    "name": "Device Info",
+                    "description": "Device ID, version, platform, hostname, and signal server status",
+                    "mimeType": "application/json"
+                },
+                {
+                    "uri": "hoptodesk://device/config",
+                    "name": "Device Configuration",
+                    "description": "HopToDesk configuration: device ID, dashboard enrollment, options",
+                    "mimeType": "application/json"
+                },
+                {
+                    "uri": "hoptodesk://device/peers",
+                    "name": "Known Peers",
+                    "description": "List of known peers from recent sessions, favorites, and LAN discovery",
+                    "mimeType": "application/json"
+                },
+                {
+                    "uri": "hoptodesk://device/connections",
+                    "name": "Active Connections",
+                    "description": "Currently active remote desktop connections",
+                    "mimeType": "application/json"
+                }
             ]
         }
     })
@@ -404,51 +461,112 @@ fn handle_resources_read(request: &Value) -> Value {
             let platform = std::env::consts::OS;
             let hostname = crate::common::hostname();
             let status = crate::ui_interface::get_connect_status();
-            let status_text = match status.status_num { 1 => "online", 0 => "connecting", _ => "offline" };
-            let info = json!({ "device_id": id, "version": version, "platform": platform, "hostname": hostname, "status": status_text, "status_num": status.status_num });
+            let status_text = match status.status_num {
+                1 => "online",
+                0 => "connecting",
+                _ => "offline",
+            };
+            let info = json!({
+                "device_id": id,
+                "version": version,
+                "platform": platform,
+                "hostname": hostname,
+                "status": status_text,
+                "status_num": status.status_num
+            });
             (serde_json::to_string_pretty(&info).unwrap_or_default(), "application/json")
         },
         "hoptodesk://device/config" => {
             let id = hbb_common::config::Config::get_id();
             let dashboard_user_id = hbb_common::config::Config::get_option("dashboard_user_id");
             let config_dir = hbb_common::config::Config::path("").to_string_lossy().to_string();
-            let config = json!({ "device_id": id, "dashboard_user_id": if dashboard_user_id.is_empty() { Value::Null } else { Value::String(dashboard_user_id) }, "config_directory": config_dir, "version": env!("CARGO_PKG_VERSION"), "platform": std::env::consts::OS });
+            let config = json!({
+                "device_id": id,
+                "dashboard_user_id": if dashboard_user_id.is_empty() { Value::Null } else { Value::String(dashboard_user_id) },
+                "config_directory": config_dir,
+                "version": env!("CARGO_PKG_VERSION"),
+                "platform": std::env::consts::OS
+            });
             (serde_json::to_string_pretty(&config).unwrap_or_default(), "application/json")
         },
         "hoptodesk://device/peers" => {
-            let peers: Vec<Value> = PeerConfig::peers(None).into_iter().map(|(id, modified, config)| {
-                let last_seen = modified.duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                json!({ "id": id, "username": config.info.username, "hostname": config.info.hostname, "platform": config.info.platform, "last_seen_epoch": last_seen })
-            }).collect();
+            let peers: Vec<Value> = PeerConfig::peers(None)
+                .into_iter()
+                .map(|(id, modified, config)| {
+                    let last_seen = modified
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    json!({
+                        "id": id,
+                        "username": config.info.username,
+                        "hostname": config.info.hostname,
+                        "platform": config.info.platform,
+                        "last_seen_epoch": last_seen
+                    })
+                })
+                .collect();
             (serde_json::to_string_pretty(&peers).unwrap_or_default(), "application/json")
         },
         "hoptodesk://device/connections" => {
             match tool_list_active_connections() {
                 Ok(content) => {
-                    let text = content.as_array().and_then(|arr| arr.first()).and_then(|c| c["text"].as_str()).unwrap_or("[]").to_string();
+                    let text = content.as_array()
+                        .and_then(|arr| arr.first())
+                        .and_then(|c| c["text"].as_str())
+                        .unwrap_or("[]")
+                        .to_string();
                     (text, "application/json")
                 },
                 Err(e) => (format!("{{\"error\": \"{}\"}}", e), "application/json"),
             }
         },
         _ => {
-            return json!({ "jsonrpc": "2.0", "error": { "code": -32602, "message": format!("Unknown resource URI: {}", uri) } });
+            return json!({
+                "jsonrpc": "2.0",
+                "error": { "code": -32602, "message": format!("Unknown resource URI: {}", uri) }
+            });
         }
     };
-    json!({ "jsonrpc": "2.0", "result": { "contents": [{ "uri": uri, "mimeType": mime, "text": content_text }] } })
+    json!({
+        "jsonrpc": "2.0",
+        "result": {
+            "contents": [{
+                "uri": uri,
+                "mimeType": mime,
+                "text": content_text
+            }]
+        }
+    })
 }
 
 fn handle_roots_list() -> Value {
     let mut roots = Vec::new();
+
     if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
         let path = std::path::PathBuf::from(home);
-        roots.push(json!({ "uri": format!("file://{}", path.to_string_lossy()), "name": "Home Directory" }));
+        roots.push(json!({
+            "uri": format!("file://{}", path.to_string_lossy()),
+            "name": "Home Directory"
+        }));
     }
+
     let config_dir = hbb_common::config::Config::path("");
-    roots.push(json!({ "uri": format!("file://{}", config_dir.to_string_lossy()), "name": "HopToDesk Config" }));
+    roots.push(json!({
+        "uri": format!("file://{}", config_dir.to_string_lossy()),
+        "name": "HopToDesk Config"
+    }));
+
     let tmp = std::env::temp_dir();
-    roots.push(json!({ "uri": format!("file://{}", tmp.to_string_lossy()), "name": "Temp Directory" }));
-    json!({ "jsonrpc": "2.0", "result": { "roots": roots } })
+    roots.push(json!({
+        "uri": format!("file://{}", tmp.to_string_lossy()),
+        "name": "Temp Directory"
+    }));
+
+    json!({
+        "jsonrpc": "2.0",
+        "result": { "roots": roots }
+    })
 }
 
 fn handle_tools_list() -> Value {
@@ -825,6 +943,218 @@ fn handle_tools_list() -> Value {
                         "required": ["command"]
                     },
                     "annotations": { "readOnlyHint": false, "destructiveHint": true, "confirmationHint": true }
+                },
+                {
+                    "name": "scroll",
+                    "description": "Scroll the mouse wheel at a position. Move the mouse to (x, y) first if provided, then scroll in the given direction.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer", "description": "X coordinate to scroll at. Omit to scroll at current position." },
+                            "y": { "type": "integer", "description": "Y coordinate to scroll at. Omit to scroll at current position." },
+                            "direction": {
+                                "type": "string",
+                                "enum": ["up", "down", "left", "right"],
+                                "description": "Scroll direction. Default: down"
+                            },
+                            "amount": { "type": "integer", "description": "Number of scroll lines. Default: 3" }
+                        }
+                    },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "mouse_drag",
+                    "description": "Click and drag from one point to another. Useful for selecting text, moving windows, resizing, or drag-and-drop operations.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "start_x": { "type": "integer", "description": "Start X coordinate" },
+                            "start_y": { "type": "integer", "description": "Start Y coordinate" },
+                            "end_x": { "type": "integer", "description": "End X coordinate" },
+                            "end_y": { "type": "integer", "description": "End Y coordinate" },
+                            "button": {
+                                "type": "string",
+                                "enum": ["left", "right", "middle"],
+                                "description": "Mouse button. Default: left"
+                            },
+                            "steps": { "type": "integer", "description": "Number of intermediate move steps for smooth drag. Default: 10" }
+                        },
+                        "required": ["start_x", "start_y", "end_x", "end_y"]
+                    },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "wait_for_screen_change",
+                    "description": "Block until pixels change on the screen (or in a region). Use after performing an action to wait for the UI to update instead of polling with screenshots. Returns when the screen changes or timeout is reached.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer", "description": "Region left X coordinate" },
+                            "y": { "type": "integer", "description": "Region top Y coordinate" },
+                            "width": { "type": "integer", "description": "Region width" },
+                            "height": { "type": "integer", "description": "Region height" },
+                            "timeout_ms": { "type": "integer", "description": "Max wait time in milliseconds. Default: 10000. Max: 60000." },
+                            "threshold": { "type": "number", "description": "Percentage of pixels that must change to trigger. Default: 1.0" }
+                        }
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "screen_diff_summary",
+                    "description": "Two-phase screen comparison. Call once with no reference_id to capture a baseline (returns a reference_id). Then perform your action. Then call again with the reference_id to compare — returns which grid sectors changed and by how much. References expire after 60 seconds.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "reference_id": { "type": "string", "description": "Reference ID from a previous baseline capture. Omit to capture a new baseline." },
+                            "x": { "type": "integer", "description": "Region left X coordinate" },
+                            "y": { "type": "integer", "description": "Region top Y coordinate" },
+                            "width": { "type": "integer", "description": "Region width" },
+                            "height": { "type": "integer", "description": "Region height" }
+                        }
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "verify_action_result",
+                    "description": "Verify that a screen action had an effect. Captures the current screen, then polls for pixel changes. Returns whether the screen changed and which regions were affected. Use immediately after clicking a button or performing an action.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer", "description": "Region left X coordinate" },
+                            "y": { "type": "integer", "description": "Region top Y coordinate" },
+                            "width": { "type": "integer", "description": "Region width" },
+                            "height": { "type": "integer", "description": "Region height" },
+                            "timeout_ms": { "type": "integer", "description": "Max wait time in milliseconds. Default: 3000. Max: 30000." },
+                            "threshold": { "type": "number", "description": "Percentage of pixels that must change. Default: 1.0" }
+                        }
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "start_recording",
+                    "description": "Start recording MCP tool calls into a workflow. All subsequent tool calls (except recording tools) will be captured with their arguments and relative timestamps. Call stop_recording to get the recorded workflow.",
+                    "inputSchema": { "type": "object", "properties": {} },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "stop_recording",
+                    "description": "Stop recording and return the captured workflow as a JSON array of steps. Each step has tool_name, arguments, and delay_ms (time since previous step). The returned workflow can be passed to replay_workflow.",
+                    "inputSchema": { "type": "object", "properties": {} },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "replay_workflow",
+                    "description": "Replay a previously recorded workflow. Executes each step in sequence with the recorded delays. Use delay_multiplier to speed up (0.5) or slow down (2.0) playback.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "steps": {
+                                "type": "array",
+                                "description": "Array of workflow steps from stop_recording. Each: {tool_name, arguments, delay_ms}",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool_name": { "type": "string" },
+                                        "arguments": { "type": "object" },
+                                        "delay_ms": { "type": "integer" }
+                                    },
+                                    "required": ["tool_name", "arguments"]
+                                }
+                            },
+                            "delay_multiplier": { "type": "number", "description": "Multiply all delays by this factor. Default: 1.0. Use 0 for no delays." }
+                        },
+                        "required": ["steps"]
+                    },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "read_screen_text",
+                    "description": "OCR the primary display (or a cropped region) and return recognized text. Uses native OS OCR (Windows Media.Ocr / macOS Vision framework). Useful for reading dialog text, error messages, labels, or any on-screen text.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "x": { "type": "integer", "description": "Crop region left X coordinate in pixels" },
+                            "y": { "type": "integer", "description": "Crop region top Y coordinate in pixels" },
+                            "width": { "type": "integer", "description": "Crop region width in pixels" },
+                            "height": { "type": "integer", "description": "Crop region height in pixels" },
+                            "language": { "type": "string", "description": "BCP-47 language tag (e.g. 'en', 'ja'). Default: system default" }
+                        }
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "get_screen_size",
+                    "description": "Get the primary display resolution in pixels. Returns width and height.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {}
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "find_element",
+                    "description": "OCR the screen and find text matching a query. Returns matching text blocks with their pixel coordinates and center points, useful for clicking. Case-insensitive substring match by default.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to search for on screen" },
+                            "exact": { "type": "boolean", "description": "Require exact match instead of substring. Default: false" }
+                        },
+                        "required": ["text"]
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "click_text",
+                    "description": "OCR the screen, find the specified text, and click its center in one step. Reduces 3 round-trips (screenshot + find + click) to 1.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to find and click" },
+                            "button": { "type": "string", "enum": ["left", "right", "middle"], "description": "Mouse button. Default: left" },
+                            "occurrence": { "type": "integer", "description": "Which occurrence to click if text appears multiple times (1-based). Default: 1" }
+                        },
+                        "required": ["text"]
+                    },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "wait_for_text",
+                    "description": "Block until specific text appears on screen via OCR polling. Returns when text is found or timeout is reached.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "text": { "type": "string", "description": "Text to wait for (case-insensitive substring match)" },
+                            "timeout_ms": { "type": "integer", "description": "Maximum wait time in ms. Default: 10000, max: 60000" },
+                            "interval_ms": { "type": "integer", "description": "Polling interval in ms. Default: 500" }
+                        },
+                        "required": ["text"]
+                    },
+                    "annotations": { "readOnlyHint": true }
+                },
+                {
+                    "name": "key_hold",
+                    "description": "Press and hold a key without releasing it. Use with key_release for modifier+click workflows (e.g. Ctrl+click, Shift+drag).",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Key to hold (e.g. 'ctrl', 'shift', 'alt', 'meta', or any key name from key_press)" }
+                        },
+                        "required": ["key"]
+                    },
+                    "annotations": { "readOnlyHint": false }
+                },
+                {
+                    "name": "key_release",
+                    "description": "Release a previously held key. Must be paired with a prior key_hold call.",
+                    "inputSchema": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Key to release (must match a prior key_hold)" }
+                        },
+                        "required": ["key"]
+                    },
+                    "annotations": { "readOnlyHint": false }
                 }
             ]
         }
@@ -862,8 +1192,38 @@ fn handle_tools_call(request: &Value) -> Value {
         "list_local_files" => tool_list_local_files(arguments),
         "read_local_file" => tool_read_local_file(arguments),
         "run_command" => tool_run_command(arguments),
+        "scroll" => tool_scroll(arguments),
+        "mouse_drag" => tool_mouse_drag(arguments),
+        "wait_for_screen_change" => tool_wait_for_screen_change(arguments),
+        "screen_diff_summary" => tool_screen_diff_summary(arguments),
+        "verify_action_result" => tool_verify_action_result(arguments),
+        "start_recording" => tool_start_recording(),
+        "stop_recording" => tool_stop_recording(),
+        "replay_workflow" => tool_replay_workflow(arguments),
+        "read_screen_text" => tool_read_screen_text(arguments),
+        "get_screen_size" => tool_get_screen_size(),
+        "find_element" => tool_find_element(arguments),
+        "click_text" => tool_click_text(arguments),
+        "wait_for_text" => tool_wait_for_text(arguments),
+        "key_hold" => tool_key_hold(arguments),
+        "key_release" => tool_key_release(arguments),
         _ => Err(format!("Unknown tool: {}", tool_name)),
     };
+
+    if !matches!(tool_name, "start_recording" | "stop_recording" | "replay_workflow") {
+        if let Ok(mut state) = WORKFLOW_STATE.lock() {
+            if state.recording {
+                let elapsed = state.start_time
+                    .map(|t| t.elapsed().as_millis() as u64)
+                    .unwrap_or(0);
+                state.steps.push(WorkflowStep {
+                    tool_name: tool_name.to_string(),
+                    arguments: arguments.clone(),
+                    timestamp_ms: elapsed,
+                });
+            }
+        }
+    }
 
     match result {
         Ok(content) => json!({
@@ -881,7 +1241,7 @@ fn handle_tools_call(request: &Value) -> Value {
 }
 
 fn tool_screenshot(args: &Value) -> Result<Value, String> {
-    // Try platform-specific capture first, fall back to scrap
+
     #[cfg(windows)]
     {
         if let Ok(result) = screenshot_gdi(args) {
@@ -920,15 +1280,8 @@ fn screenshot_gdi(args: &Value) -> Result<Value, String> {
             return Err("No display available".to_string());
         }
 
-        // Check for crop region
-        let crop = args["x"].as_i64().is_some() && args["y"].as_i64().is_some()
-            && args["width"].as_i64().is_some() && args["height"].as_i64().is_some();
-        let (src_x, src_y, cap_w, cap_h) = if crop {
-            let cx = args["x"].as_i64().unwrap() as i32;
-            let cy = args["y"].as_i64().unwrap() as i32;
-            let cw = args["width"].as_i64().unwrap() as i32;
-            let ch = args["height"].as_i64().unwrap() as i32;
-            // Clamp to screen bounds
+        let (src_x, src_y, cap_w, cap_h) = if let Some((cx, cy, cw, ch)) = parse_crop_region(args) {
+
             let cx = cx.max(0).min(screen_w);
             let cy = cy.max(0).min(screen_h);
             let cw = cw.min(screen_w - cx).max(1);
@@ -947,14 +1300,13 @@ fn screenshot_gdi(args: &Value) -> Result<Value, String> {
         let old = SelectObject(mem_dc, bitmap);
         BitBlt(mem_dc, 0, 0, cap_w, cap_h, screen_dc, src_x, src_y, SRCCOPY);
 
-        // BITMAPINFOHEADER (40 bytes)
         let mut bmi = [0u8; 44];
-        bmi[0] = 40; // biSize = 40
+        bmi[0] = 40;
         bmi[4..8].copy_from_slice(&cap_w.to_le_bytes());
-        let neg_h = (-cap_h).to_le_bytes(); // top-down
+        let neg_h = (-cap_h).to_le_bytes();
         bmi[8..12].copy_from_slice(&neg_h);
-        bmi[12..14].copy_from_slice(&1u16.to_le_bytes()); // biPlanes
-        bmi[14..16].copy_from_slice(&32u16.to_le_bytes()); // biBitCount
+        bmi[12..14].copy_from_slice(&1u16.to_le_bytes());
+        bmi[14..16].copy_from_slice(&32u16.to_le_bytes());
 
         let mut pixels = vec![0u8; (cap_w * cap_h * 4) as usize];
         let ret = GetDIBits(mem_dc, bitmap, 0, cap_h as u32, pixels.as_mut_ptr(), bmi.as_mut_ptr(), 0);
@@ -968,13 +1320,12 @@ fn screenshot_gdi(args: &Value) -> Result<Value, String> {
             return Err("GetDIBits failed".to_string());
         }
 
-        // Convert BGRA to RGBA
         let mut rgba = Vec::with_capacity(pixels.len());
         for chunk in pixels.chunks(4) {
-            rgba.push(chunk[2]); // R
-            rgba.push(chunk[1]); // G
-            rgba.push(chunk[0]); // B
-            rgba.push(255);      // A
+            rgba.push(chunk[2]);
+            rgba.push(chunk[1]);
+            rgba.push(chunk[0]);
+            rgba.push(255);
         }
 
         let mut png = Vec::new();
@@ -1007,7 +1358,6 @@ fn screenshot_scrap(args: &Value) -> Result<Value, String> {
 
     let mut capturer = Capturer::new(display).map_err(|e| format!("Failed to create capturer: {}", e))?;
 
-    // Try to capture a frame (may need several attempts for DXGI init)
     let mut frame_data = None;
     for _attempt in 0..30 {
         match capturer.frame(Duration::from_millis(200)) {
@@ -1016,7 +1366,7 @@ fn screenshot_scrap(args: &Value) -> Result<Value, String> {
                     scrap::Frame::PixelBuffer(pb) => pb,
                     _ => return Err("GPU texture frames not supported in MCP mode".to_string()),
                 };
-                // Convert BGRA to RGBA
+
                 let bgra = pixbuf.data();
                 let stride = pixbuf.stride()[0];
                 let mut rgba = Vec::with_capacity(w * h * 4);
@@ -1024,10 +1374,10 @@ fn screenshot_scrap(args: &Value) -> Result<Value, String> {
                     for x in 0..w {
                         let i = stride * y + 4 * x;
                         if i + 3 < bgra.len() {
-                            rgba.push(bgra[i + 2]); // R
-                            rgba.push(bgra[i + 1]); // G
-                            rgba.push(bgra[i]);     // B
-                            rgba.push(bgra[i + 3]); // A
+                            rgba.push(bgra[i + 2]);
+                            rgba.push(bgra[i + 1]);
+                            rgba.push(bgra[i]);
+                            rgba.push(bgra[i + 3]);
                         }
                     }
                 }
@@ -1044,12 +1394,10 @@ fn screenshot_scrap(args: &Value) -> Result<Value, String> {
 
     let rgba = frame_data.ok_or("Failed to capture frame after retries. The desktop may be locked or inaccessible.")?;
 
-    // Encode as PNG
     let mut png = Vec::new();
     repng::encode(&mut png, w as _, h as _, &rgba)
         .map_err(|e| format!("PNG encode error: {}", e))?;
 
-    // Base64 encode
     let b64 = hbb_common::base64::engine::general_purpose::STANDARD.encode(&png);
 
     Ok(json!([{
@@ -1057,6 +1405,262 @@ fn screenshot_scrap(args: &Value) -> Result<Value, String> {
         "data": b64,
         "mimeType": "image/png"
     }]))
+}
+
+fn capture_rgba(region: Option<(i32, i32, i32, i32)>) -> Result<(Vec<u8>, u32, u32), String> {
+
+    #[cfg(windows)]
+    let check_blank = region.is_none();
+    #[cfg(windows)]
+    {
+        if let Ok(result) = capture_rgba_gdi(region) {
+            if check_blank && is_blank_capture(&result.0) {
+                return Err(blank_capture_error_message());
+            }
+            return Ok(result);
+        }
+    }
+    let result = capture_rgba_scrap(region)?;
+    #[cfg(windows)]
+    if check_blank && is_blank_capture(&result.0) {
+        return Err(blank_capture_error_message());
+    }
+    Ok(result)
+}
+
+#[cfg(windows)]
+fn is_blank_capture(rgba: &[u8]) -> bool {
+    if rgba.len() < 4 {
+        return false;
+    }
+
+    let stride = (rgba.len() / (256 * 4)).max(1) * 4;
+    let mut i = 0;
+    while i + 3 < rgba.len() {
+        if rgba[i] != 0 || rgba[i + 1] != 0 || rgba[i + 2] != 0 {
+            return false;
+        }
+        i += stride;
+    }
+    true
+}
+
+#[cfg(windows)]
+fn blank_capture_error_message() -> String {
+    "Screen capture returned an empty (all-black) buffer. This usually means the \
+     process has no access to the interactive desktop — e.g. it was launched from \
+     an SSH session, a Windows service (Session 0), or before a user logged in. \
+     Run HopToDesk from the user's interactive session (double-click, scheduled \
+     task with the user's login token, or `psexec -i -s`).".to_string()
+}
+
+#[cfg(windows)]
+fn capture_rgba_gdi(region: Option<(i32, i32, i32, i32)>) -> Result<(Vec<u8>, u32, u32), String> {
+    #[allow(clashing_extern_declarations)]
+    extern "system" {
+        fn GetDC(hwnd: isize) -> isize;
+        fn ReleaseDC(hwnd: isize, hdc: isize) -> i32;
+        fn CreateCompatibleDC(hdc: isize) -> isize;
+        fn CreateCompatibleBitmap(hdc: isize, w: i32, h: i32) -> isize;
+        fn SelectObject(hdc: isize, obj: isize) -> isize;
+        fn BitBlt(dst: isize, x: i32, y: i32, w: i32, h: i32, src: isize, sx: i32, sy: i32, rop: u32) -> i32;
+        fn DeleteDC(hdc: isize) -> i32;
+        fn DeleteObject(obj: isize) -> i32;
+        fn GetSystemMetrics(idx: i32) -> i32;
+        fn GetDIBits(hdc: isize, hbm: isize, start: u32, lines: u32, bits: *mut u8, bi: *mut u8, usage: u32) -> i32;
+    }
+    const SM_CXSCREEN: i32 = 0;
+    const SM_CYSCREEN: i32 = 1;
+    const SRCCOPY: u32 = 0x00CC0020;
+
+    unsafe {
+        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+        if screen_w <= 0 || screen_h <= 0 {
+            return Err("No display available".to_string());
+        }
+        let (src_x, src_y, cap_w, cap_h) = match region {
+            Some((rx, ry, rw, rh)) => {
+                let cx = rx.max(0).min(screen_w);
+                let cy = ry.max(0).min(screen_h);
+                let cw = rw.min(screen_w - cx).max(1);
+                let ch = rh.min(screen_h - cy).max(1);
+                (cx, cy, cw, ch)
+            }
+            None => (0, 0, screen_w, screen_h),
+        };
+        let screen_dc = GetDC(0);
+        if screen_dc == 0 { return Err("GetDC failed".to_string()); }
+        let mem_dc = CreateCompatibleDC(screen_dc);
+        let bitmap = CreateCompatibleBitmap(screen_dc, cap_w, cap_h);
+        let old = SelectObject(mem_dc, bitmap);
+        BitBlt(mem_dc, 0, 0, cap_w, cap_h, screen_dc, src_x, src_y, SRCCOPY);
+
+        let mut bmi = [0u8; 44];
+        bmi[0] = 40;
+        bmi[4..8].copy_from_slice(&cap_w.to_le_bytes());
+        let neg_h = (-cap_h).to_le_bytes();
+        bmi[8..12].copy_from_slice(&neg_h);
+        bmi[12..14].copy_from_slice(&1u16.to_le_bytes());
+        bmi[14..16].copy_from_slice(&32u16.to_le_bytes());
+
+        let mut pixels = vec![0u8; (cap_w * cap_h * 4) as usize];
+        let ret = GetDIBits(mem_dc, bitmap, 0, cap_h as u32, pixels.as_mut_ptr(), bmi.as_mut_ptr(), 0);
+        SelectObject(mem_dc, old);
+        DeleteObject(bitmap);
+        DeleteDC(mem_dc);
+        ReleaseDC(0, screen_dc);
+        if ret == 0 { return Err("GetDIBits failed".to_string()); }
+
+        let mut rgba = Vec::with_capacity(pixels.len());
+        for chunk in pixels.chunks(4) {
+            rgba.push(chunk[2]);
+            rgba.push(chunk[1]);
+            rgba.push(chunk[0]);
+            rgba.push(255);
+        }
+        Ok((rgba, cap_w as u32, cap_h as u32))
+    }
+}
+
+fn capture_rgba_scrap(region: Option<(i32, i32, i32, i32)>) -> Result<(Vec<u8>, u32, u32), String> {
+    use scrap::{Capturer, Display, TraitCapturer, TraitPixelBuffer};
+
+    let displays = Display::all().map_err(|e| format!("Failed to get displays: {}", e))?;
+    if displays.is_empty() {
+        return Err("No displays found".to_string());
+    }
+    let display = displays.into_iter().next().unwrap();
+    let w = display.width();
+    let h = display.height();
+    let mut capturer = Capturer::new(display).map_err(|e| format!("Failed to create capturer: {}", e))?;
+
+    let mut frame_data = None;
+    for _ in 0..30 {
+        match capturer.frame(Duration::from_millis(200)) {
+            Ok(frame) => {
+                let pixbuf = match &frame {
+                    scrap::Frame::PixelBuffer(pb) => pb,
+                    _ => return Err("GPU texture frames not supported".to_string()),
+                };
+                let bgra = pixbuf.data();
+                let stride = pixbuf.stride()[0];
+                let mut rgba = Vec::with_capacity(w * h * 4);
+                for row in 0..h {
+                    for col in 0..w {
+                        let i = stride * row + 4 * col;
+                        if i + 3 < bgra.len() {
+                            rgba.push(bgra[i + 2]);
+                            rgba.push(bgra[i + 1]);
+                            rgba.push(bgra[i]);
+                            rgba.push(bgra[i + 3]);
+                        }
+                    }
+                }
+                frame_data = Some(rgba);
+                break;
+            }
+            Err(ref e) if e.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(100));
+                continue;
+            }
+            Err(e) => return Err(format!("Capture error: {}", e)),
+        }
+    }
+    let full_rgba = frame_data.ok_or("Failed to capture frame after retries")?;
+
+    if let Some((rx, ry, rw, rh)) = region {
+        let rx = rx.max(0) as usize;
+        let ry = ry.max(0) as usize;
+        let rw = (rw as usize).min(w.saturating_sub(rx));
+        let rh = (rh as usize).min(h.saturating_sub(ry));
+        if rw == 0 || rh == 0 {
+            return Err("Crop region out of bounds".to_string());
+        }
+        let mut cropped = Vec::with_capacity(rw * rh * 4);
+        for row in ry..(ry + rh) {
+            let start = (row * w + rx) * 4;
+            let end = start + rw * 4;
+            if end <= full_rgba.len() {
+                cropped.extend_from_slice(&full_rgba[start..end]);
+            }
+        }
+        return Ok((cropped, rw as u32, rh as u32));
+    }
+
+    Ok((full_rgba, w as u32, h as u32))
+}
+
+fn pixel_diff_percentage(buf1: &[u8], buf2: &[u8], threshold: u8) -> f64 {
+    if buf1.len() != buf2.len() || buf1.is_empty() {
+        return 100.0;
+    }
+    let pixel_count = buf1.len() / 4;
+    let mut changed = 0usize;
+    for i in (0..buf1.len()).step_by(4) {
+        let dr = (buf1[i] as i16 - buf2[i] as i16).unsigned_abs() as u8;
+        let dg = (buf1[i+1] as i16 - buf2[i+1] as i16).unsigned_abs() as u8;
+        let db = (buf1[i+2] as i16 - buf2[i+2] as i16).unsigned_abs() as u8;
+        if dr > threshold || dg > threshold || db > threshold {
+            changed += 1;
+        }
+    }
+    (changed as f64 / pixel_count as f64) * 100.0
+}
+
+fn grid_diff(buf1: &[u8], buf2: &[u8], width: u32, height: u32) -> Vec<Value> {
+    let cols = 3u32;
+    let rows = 3u32;
+    let cell_w = width / cols;
+    let cell_h = height / rows;
+    let labels = ["top-left", "top-center", "top-right",
+                  "middle-left", "center", "middle-right",
+                  "bottom-left", "bottom-center", "bottom-right"];
+    let mut regions = Vec::new();
+
+    for gy in 0..rows {
+        for gx in 0..cols {
+            let mut changed_pixels = 0u32;
+            let mut total_pixels = 0u32;
+            let x0 = gx * cell_w;
+            let y0 = gy * cell_h;
+            let x1 = if gx == cols - 1 { width } else { x0 + cell_w };
+            let y1 = if gy == rows - 1 { height } else { y0 + cell_h };
+            for row in y0..y1 {
+                for col in x0..x1 {
+                    let i = ((row * width + col) * 4) as usize;
+                    if i + 3 < buf1.len() && i + 3 < buf2.len() {
+                        total_pixels += 1;
+                        let dr = (buf1[i] as i16 - buf2[i] as i16).unsigned_abs();
+                        let dg = (buf1[i+1] as i16 - buf2[i+1] as i16).unsigned_abs();
+                        let db = (buf1[i+2] as i16 - buf2[i+2] as i16).unsigned_abs();
+                        if dr > 10 || dg > 10 || db > 10 {
+                            changed_pixels += 1;
+                        }
+                    }
+                }
+            }
+            if total_pixels > 0 {
+                let pct = (changed_pixels as f64 / total_pixels as f64) * 100.0;
+                if pct > 0.5 {
+                    let intensity = if pct > 30.0 { "high" } else if pct > 5.0 { "medium" } else { "low" };
+                    let idx = (gy * cols + gx) as usize;
+                    regions.push(json!({
+                        "area": labels[idx],
+                        "changed_percentage": (pct * 10.0).round() / 10.0,
+                        "intensity": intensity,
+                    }));
+                }
+            }
+        }
+    }
+    regions
+}
+
+fn cleanup_diff_refs() {
+    if let Ok(mut refs) = DIFF_REFS.lock() {
+        refs.retain(|_, (_, _, _, created)| created.elapsed() < Duration::from_secs(60));
+    }
 }
 
 fn tool_get_window_list() -> Result<Value, String> {
@@ -1155,7 +1759,6 @@ fn tool_key_press(args: &Value) -> Result<Value, String> {
 
     let mut enigo = Enigo::new();
 
-    // Press modifiers
     for m in &modifiers {
         let _ = match m.to_lowercase().as_str() {
             "ctrl" | "control" => enigo.key_down(Key::Control),
@@ -1168,7 +1771,6 @@ fn tool_key_press(args: &Value) -> Result<Value, String> {
 
     enigo.key_click(key);
 
-    // Release modifiers in reverse
     for m in modifiers.iter().rev() {
         match m.to_lowercase().as_str() {
             "ctrl" | "control" => enigo.key_up(Key::Control),
@@ -1181,8 +1783,6 @@ fn tool_key_press(args: &Value) -> Result<Value, String> {
 
     Ok(json!([{ "type": "text", "text": format!("Pressed {}{}", if modifiers.is_empty() { String::new() } else { format!("{}+", modifiers.join("+")) }, key_str) }]))
 }
-
-// --- Agent-friendly tools ---
 
 fn tool_get_device_info() -> Result<Value, String> {
     let id = hbb_common::config::Config::get_id();
@@ -1299,7 +1899,7 @@ fn tool_list_active_connections() -> Result<Value, String> {
     let connections: Vec<Value> = crate::ui::list_active_connections()
         .into_iter()
         .map(|(id, conn_type, alive)| {
-            // Check if remote connection is actually established (not just process alive)
+
             let connected = if alive {
                 query_child_state(&id)
                     .map(|s| s["video"]["width"].as_i64().unwrap_or(0) > 0)
@@ -1324,8 +1924,6 @@ fn tool_list_active_connections() -> Result<Value, String> {
     Err("list_active_connections not available in this build".to_string())
 }
 
-// --- UI State tool ---
-
 #[cfg(not(any(feature = "flutter", feature = "cli")))]
 fn tool_get_ui_state(args: &Value) -> Result<Value, String> {
     let filter_peer = args["peer_id"].as_str();
@@ -1333,12 +1931,10 @@ fn tool_get_ui_state(args: &Value) -> Result<Value, String> {
     let windows = get_window_list_platform()?;
     let windows_arr = windows.as_array().cloned().unwrap_or_default();
 
-    // Find main HopToDesk window
     let main_win = windows_arr.iter().find(|w| {
         w["title"].as_str() == Some("HopToDesk")
     }).cloned();
 
-    // Query child processes for rich state data
     let mut state_files: std::collections::HashMap<String, Value> = std::collections::HashMap::new();
     for (pid, _, alive) in &connections {
         if !alive { continue; }
@@ -1350,7 +1946,6 @@ fn tool_get_ui_state(args: &Value) -> Result<Value, String> {
         }
     }
 
-    // Build state for each active connection
     let mut conn_states = Vec::new();
     for (peer_id, conn_type, alive) in &connections {
         if let Some(filter) = filter_peer {
@@ -1363,10 +1958,8 @@ fn tool_get_ui_state(args: &Value) -> Result<Value, String> {
 
         let toolbar = get_toolbar_buttons(conn_type);
 
-        // Merge the rich state from child process if available
-        // Determine if remote connection is actually established (not just process alive)
         let connected = if let Some(rich_state) = state_files.get(peer_id) {
-            // Connection is established if we have video dimensions from the remote
+
             rich_state["video"]["width"].as_i64().unwrap_or(0) > 0
         } else {
             false
@@ -1401,8 +1994,6 @@ fn tool_get_ui_state(_args: &Value) -> Result<Value, String> {
     Err("get_ui_state not available in this build".to_string())
 }
 
-// --- Wait for Event tool ---
-
 fn tool_wait_for_event(args: &Value) -> Result<Value, String> {
     let event = args["event"].as_str().ok_or("Missing event")?;
     let peer_id = args["peer_id"].as_str().ok_or("Missing peer_id")?;
@@ -1431,7 +2022,7 @@ fn tool_wait_for_event(args: &Value) -> Result<Value, String> {
                 "connection_ready" => {
                     if let Some((_, _, alive)) = conn {
                         if *alive {
-                            // Connection exists and is alive — query state to check if video is active
+
                             if let Some(state) = query_child_state(peer_id) {
                                 let video_w = state["video"]["width"].as_i64().unwrap_or(0);
                                 if video_w > 0 {
@@ -1518,8 +2109,6 @@ fn tool_wait_for_event(args: &Value) -> Result<Value, String> {
     }
 }
 
-/// Query a child connection's UI state via the temp file mechanism.
-/// Sends "query_state" to child, waits up to 1s for the state file.
 #[cfg(not(any(feature = "flutter", feature = "cli")))]
 fn query_child_state(peer_id: &str) -> Option<Value> {
     let path = std::env::temp_dir().join(format!("hoptodesk-mcp-state-{}.json", peer_id));
@@ -1539,8 +2128,6 @@ fn query_child_state(peer_id: &str) -> Option<Value> {
     None
 }
 
-// --- Dismiss Dialog tool ---
-
 fn tool_dismiss_dialog(args: &Value) -> Result<Value, String> {
     let peer_id = args["peer_id"].as_str().ok_or("Missing peer_id")?;
 
@@ -1559,13 +2146,10 @@ fn tool_dismiss_dialog(args: &Value) -> Result<Value, String> {
     return Err("dismiss_dialog not available in this build".to_string());
 }
 
-// --- Click Toolbar Button tool ---
-
 fn tool_click_toolbar_button(args: &Value) -> Result<Value, String> {
     let peer_id = args["peer_id"].as_str().ok_or("Missing peer_id")?;
     let button_id = args["button_id"].as_str().ok_or("Missing button_id")?;
 
-    // Validate: either a top-level button ID or "menu:item" format for submenu items
     let valid_buttons = ["fullscreen", "chat", "action", "display", "keyboard",
                          "recording", "securitycode", "transfer-file", "remote-print",
                          "screenshot", "switch-sides", "privacy-mode"];
@@ -1610,8 +2194,7 @@ fn tool_click_toolbar_button(args: &Value) -> Result<Value, String> {
     return Err("click_toolbar_button not available in this build".to_string());
 }
 
-// --- Test Print tool ---
-
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 fn tool_test_print(args: &Value) -> Result<Value, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1623,7 +2206,6 @@ fn tool_test_print(args: &Value) -> Result<Value, String> {
             return Err("No printer configured. Use set_remote_printer first.".to_string());
         }
 
-        // Use GDI printing to send a text page to the printer
         let result = print_text_to_printer(&printer, text);
         match result {
             Ok(path) => Ok(json!([{ "type": "text", "text": format!("Test print job sent to '{}'. Output: {}", printer, path) }])),
@@ -1671,7 +2253,6 @@ fn print_text_to_printer(printer_name: &str, text: &str) -> Result<String, Strin
         OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    // Determine output path for PDF printers
     let output_path = if printer_name.to_lowercase().contains("print to pdf") {
         let docs = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into());
         let ts = std::time::SystemTime::now()
@@ -1718,11 +2299,9 @@ fn print_text_to_printer(printer_name: &str, text: &str) -> Result<String, Strin
             return Err("StartPage failed".to_string());
         }
 
-        // Get page dimensions
-        let page_w = GetDeviceCaps(hdc, 8); // HORZRES
-        let page_h = GetDeviceCaps(hdc, 10); // VERTRES
+        let page_w = GetDeviceCaps(hdc, 8);
+        let page_h = GetDeviceCaps(hdc, 10);
 
-        // Build the full text with timestamp
         let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let full_text = format!("{}{}", text, ts);
         let text_wide = to_wide(&full_text);
@@ -1734,7 +2313,6 @@ fn print_text_to_printer(printer_name: &str, text: &str) -> Result<String, Strin
             bottom: page_h - 100,
         };
 
-        // DT_WORDBREAK = 0x10
         DrawTextW(hdc, text_wide.as_ptr(), -1, &mut rect, 0x10);
 
         EndPage(hdc);
@@ -1745,8 +2323,7 @@ fn print_text_to_printer(printer_name: &str, text: &str) -> Result<String, Strin
     Ok(output_path.unwrap_or_else(|| "sent to printer spool".to_string()))
 }
 
-// --- Set Remote Printer tool ---
-
+#[cfg_attr(not(target_os = "windows"), allow(unused_variables))]
 fn tool_set_remote_printer(args: &Value) -> Result<Value, String> {
     #[cfg(target_os = "windows")]
     {
@@ -1756,7 +2333,6 @@ fn tool_set_remote_printer(args: &Value) -> Result<Value, String> {
         let printer_name = args["printer_name"].as_str().unwrap_or("");
         let auto_print = args["auto_print"].as_bool().unwrap_or(true);
 
-        // If no printer_name, just list available printers
         if printer_name.is_empty() {
             let current = LocalConfig::get_option(keys::OPTION_PRINTER_SELECTED_NAME);
             let auto_enabled = LocalConfig::get_option(keys::OPTION_PRINTER_ALLOW_AUTO_PRINT) == "Y";
@@ -1768,7 +2344,6 @@ fn tool_set_remote_printer(args: &Value) -> Result<Value, String> {
             return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
         }
 
-        // Handle "auto" — select the only printer
         let selected = if printer_name == "auto" {
             if printers.is_empty() {
                 return Err("No printers available".to_string());
@@ -1778,14 +2353,13 @@ fn tool_set_remote_printer(args: &Value) -> Result<Value, String> {
             }
             printers[0].clone()
         } else {
-            // Validate printer exists
+
             if !printers.iter().any(|p| p == printer_name) {
                 return Err(format!("Printer '{}' not found. Available: {:?}", printer_name, printers));
             }
             printer_name.to_string()
         };
 
-        // Save settings
         LocalConfig::set_option(keys::OPTION_PRINTER_SELECTED_NAME.to_string(), selected.clone());
         if auto_print {
             LocalConfig::set_option(keys::OPTION_PRINTER_ALLOW_AUTO_PRINT.to_string(), "Y".to_string());
@@ -1800,13 +2374,12 @@ fn tool_set_remote_printer(args: &Value) -> Result<Value, String> {
     Err("set_remote_printer is only available on Windows".to_string())
 }
 
-/// Get toolbar button list for a connection. Use click_toolbar_button tool to interact.
 fn get_toolbar_buttons(conn_type: &str) -> Value {
     let is_file_transfer = conn_type == "file-transfer";
     let is_view_camera = conn_type == "view-camera";
 
     let mut buttons = Vec::new();
-    // Standard buttons for a remote desktop session
+
     if !is_file_transfer {
         buttons.push("fullscreen");
     }
@@ -1903,7 +2476,6 @@ fn add_submenu_info(item: &mut Value, id: &str) {
     }
 }
 
-// Platform-specific window list
 #[cfg(windows)]
 fn get_window_list_platform() -> Result<Value, String> {
     use std::ffi::OsString;
@@ -1972,7 +2544,7 @@ fn get_window_list_platform() -> Result<Value, String> {
     let output = Command::new("wmctrl")
         .arg("-lG")
         .output()
-        .map_err(|e| format!("wmctrl error (install with: pkg install wmctrl): {}", e))?;
+        .map_err(|e| format!("wmctrl error (install the wmctrl package): {}", e))?;
     let text = String::from_utf8_lossy(&output.stdout);
     let mut windows = Vec::new();
     for line in text.lines() {
@@ -1995,15 +2567,12 @@ fn get_window_list_platform() -> Result<Value, String> {
     Err("Window listing not supported on this platform".to_string())
 }
 
-// ─── Remote Exec Operations ─────────────────────────────────────────────────
-
 fn tool_exec_operation(args: &Value) -> Result<Value, String> {
     let operation = args["operation"].as_str().unwrap_or("");
     if operation.is_empty() {
         return Err("operation is required".to_string());
     }
 
-    // Check if device is enrolled with a dashboard (authorization is enforced dashboard-side)
     let dashboard_user_id = hbb_common::config::Config::get_option("dashboard_user_id");
     if dashboard_user_id.is_empty() {
         return Err("Remote execution requires dashboard enrollment".to_string());
@@ -2048,7 +2617,6 @@ fn tool_exec_operation(args: &Value) -> Result<Value, String> {
     }
 }
 
-/// Run a shell command with timeout and capture output
 fn run_command(cmd: &str, args: &[&str], _timeout_secs: u64) -> Result<String, String> {
     use std::process::Command;
 
@@ -2088,19 +2656,19 @@ fn exec_get_system_info() -> Result<String, String> {
         if let Ok(o) = run_command("uptime", &[], 5) { info.push_str(&o); }
         Ok(info)
     }
-    #[cfg(target_os = "freebsd")]
-    {
-        let mut info = String::new();
-        if let Ok(o) = run_command("uname", &["-a"], 5) { info.push_str(&o); }
-        if let Ok(o) = run_command("sh", &["-c", "sysctl hw.physmem hw.usermem hw.ncpu 2>/dev/null"], 5) { info.push_str(&o); }
-        if let Ok(o) = run_command("uptime", &[], 5) { info.push_str(&o); }
-        Ok(info)
-    }
     #[cfg(target_os = "linux")]
     {
         let mut info = String::new();
         if let Ok(o) = run_command("uname", &["-a"], 5) { info.push_str(&o); }
         if let Ok(o) = run_command("free", &["-h"], 5) { info.push_str(&o); }
+        if let Ok(o) = run_command("uptime", &[], 5) { info.push_str(&o); }
+        Ok(info)
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let mut info = String::new();
+        if let Ok(o) = run_command("uname", &["-a"], 5) { info.push_str(&o); }
+        if let Ok(o) = run_command("sysctl", &["-n", "hw.physmem"], 5) { info.push_str(&format!("Memory: {} bytes\n", o.trim())); }
         if let Ok(o) = run_command("uptime", &[], 5) { info.push_str(&o); }
         Ok(info)
     }
@@ -2128,17 +2696,16 @@ fn exec_list_processes(args: &Value) -> Result<String, String> {
         let cmd = format!("ps aux {} | head -n {}", sort_flag, limit + 1);
         run_command("sh", &["-c", &cmd], 10)
     }
-    #[cfg(target_os = "freebsd")]
-    {
-        // FreeBSD ps doesn't support GNU --sort flag; use -o with sort
-        let sort_col = if sort_by == "memory" { "rss" } else { "pcpu" };
-        let cmd = format!("ps aux -O {} | sort -nrk 3 | head -n {}", sort_col, limit + 1);
-        run_command("sh", &["-c", &cmd], 10)
-    }
     #[cfg(target_os = "linux")]
     {
         let sort_key = if sort_by == "memory" { "--sort=-%mem" } else { "--sort=-%cpu" };
         let cmd = format!("ps aux {} | head -n {}", sort_key, limit + 1);
+        run_command("sh", &["-c", &cmd], 10)
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let sort_flag = if sort_by == "memory" { "-m" } else { "-r" };
+        let cmd = format!("ps aux {} | head -n {}", sort_flag, limit + 1);
         run_command("sh", &["-c", &cmd], 10)
     }
 }
@@ -2148,39 +2715,41 @@ fn exec_network_info() -> Result<String, String> {
     { run_command("cmd", &["/C", "ipconfig /all"], 15) }
     #[cfg(target_os = "macos")]
     { run_command("sh", &["-c", "ifconfig | grep -E 'flags|inet'"], 10) }
-    #[cfg(target_os = "freebsd")]
-    { run_command("ifconfig", &[], 10) }
     #[cfg(target_os = "linux")]
     { run_command("sh", &["-c", "ip addr show 2>/dev/null || ifconfig"], 10) }
+    #[cfg(target_os = "freebsd")]
+    { run_command("ifconfig", &[], 10) }
 }
 
-#[allow(unused_variables)]
 fn exec_get_service_logs(args: &Value) -> Result<String, String> {
-    let lines = args["lines"].as_u64().unwrap_or(50).min(200);
-
-    #[cfg(windows)]
-    {
-        // Try reading the log file
-        let log_path = format!("{}\\HopToDesk\\hoptodesk.log",
-            std::env::var("PROGRAMDATA").unwrap_or_else(|_| "C:\\ProgramData".to_string()));
-        run_command("cmd", &["/C", &format!("type \"{}\" 2>nul | more", log_path)], 10)
-            .or_else(|_| Ok("No log file found".to_string()))
+    let lines = args["lines"].as_u64().unwrap_or(50).min(200) as usize;
+    let mut newest: Option<(std::time::SystemTime, std::path::PathBuf)> = None;
+    let mut dirs = vec![hbb_common::config::Config::log_path()];
+    while let Some(dir) = dirs.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else if path.extension().map_or(false, |ext| ext == "log") {
+                if let Ok(modified) = entry.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().map_or(true, |(t, _)| modified > *t) {
+                        newest = Some((modified, path));
+                    }
+                }
+            }
+        }
     }
-    #[cfg(target_os = "macos")]
-    {
-        let cmd = format!("tail -n {} ~/Library/Logs/hoptodesk/hoptodesk.log 2>/dev/null || echo 'No log file found'", lines);
-        run_command("sh", &["-c", &cmd], 10)
-    }
-    #[cfg(target_os = "freebsd")]
-    {
-        let cmd = format!("tail -n {} /var/log/hoptodesk/hoptodesk.log 2>/dev/null || tail -n {} ~/.config/log/server/hoptodesk_rCURRENT.log 2>/dev/null || echo 'No log file found'", lines, lines);
-        run_command("sh", &["-c", &cmd], 10)
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let cmd = format!("journalctl -u hoptodesk -n {} --no-pager 2>/dev/null || tail -n {} /var/log/hoptodesk/hoptodesk.log 2>/dev/null || echo 'No log file found'", lines, lines);
-        run_command("sh", &["-c", &cmd], 10)
-    }
+    let Some((_, path)) = newest else {
+        return Ok("No log file found".to_string());
+    };
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+    let all: Vec<&str> = content.lines().collect();
+    let start = all.len().saturating_sub(lines);
+    Ok(format!("{}\n\n{}", path.display(), all[start..].join("\n")))
 }
 
 fn exec_ping_test(args: &Value) -> Result<String, String> {
@@ -2188,7 +2757,7 @@ fn exec_ping_test(args: &Value) -> Result<String, String> {
     if host.is_empty() {
         return Err("host parameter is required".to_string());
     }
-    // Validate host — no shell metacharacters
+
     if host.chars().any(|c| ";|&`$(){}[]\\!#~<>\"'".contains(c)) {
         return Err("Invalid host".to_string());
     }
@@ -2205,22 +2774,74 @@ fn exec_installed_software() -> Result<String, String> {
     { run_command("cmd", &["/C", "wmic product get name,version /format:list"], 30) }
     #[cfg(target_os = "macos")]
     { run_command("sh", &["-c", "ls /Applications/ && echo '---' && brew list --versions 2>/dev/null || true"], 15) }
-    #[cfg(target_os = "freebsd")]
-    { run_command("sh", &["-c", "pkg info 2>/dev/null | head -100 || echo 'Package manager not found'"], 15) }
     #[cfg(target_os = "linux")]
     { run_command("sh", &["-c", "dpkg -l 2>/dev/null | head -100 || rpm -qa 2>/dev/null | head -100 || echo 'Package manager not found'"], 15) }
+    #[cfg(target_os = "freebsd")]
+    { run_command("sh", &["-c", "pkg info 2>/dev/null | head -100 || echo 'Package manager not found'"], 15) }
 }
 
 fn exec_restart_hoptodesk() -> Result<String, String> {
-    eprintln!("[exec] Restarting HopToDesk service");
+    eprintln!("[exec] Restarting {} service", crate::get_app_name());
     #[cfg(windows)]
-    { run_command("cmd", &["/C", "net stop hoptodesk & net start hoptodesk"], 30) }
+    {
+        let service_name = crate::get_app_name();
+        run_command(
+            "cmd",
+            &[
+                "/C",
+                &format!(
+                    "net stop \"{}\" & net start \"{}\"",
+                    service_name, service_name
+                ),
+            ],
+            30,
+        )
+    }
     #[cfg(target_os = "macos")]
-    { run_command("sh", &["-c", "launchctl kickstart -kp system/com.hoptodesk.agent 2>/dev/null || echo 'Service restart requested'"], 15) }
-    #[cfg(target_os = "freebsd")]
-    { run_command("sh", &["-c", "service hoptodesk restart 2>/dev/null || echo 'Service restart requested'"], 15) }
+    {
+        let label = format!("{}_service", crate::get_full_name().replace(' ', ""));
+        run_command(
+            "sh",
+            &[
+                "-c",
+                &format!(
+                    "launchctl kickstart -kp system/{} 2>/dev/null || echo 'Service restart requested'",
+                    label
+                ),
+            ],
+            15,
+        )
+    }
     #[cfg(target_os = "linux")]
-    { run_command("sh", &["-c", "systemctl restart hoptodesk 2>/dev/null || echo 'Service restart requested'"], 15) }
+    {
+        let service_name = crate::get_app_name().to_lowercase();
+        run_command(
+            "sh",
+            &[
+                "-c",
+                &format!(
+                    "systemctl restart {} 2>/dev/null || echo 'Service restart requested'",
+                    service_name
+                ),
+            ],
+            15,
+        )
+    }
+    #[cfg(target_os = "freebsd")]
+    {
+        let service_name = crate::get_app_name().to_lowercase();
+        run_command(
+            "sh",
+            &[
+                "-c",
+                &format!(
+                    "service {} restart 2>/dev/null || echo 'Service restart requested'",
+                    service_name
+                ),
+            ],
+            15,
+        )
+    }
 }
 
 fn exec_kill_process(args: &Value) -> Result<String, String> {
@@ -2231,7 +2852,6 @@ fn exec_kill_process(args: &Value) -> Result<String, String> {
         return Err("process_name or pid is required".to_string());
     }
 
-    // Validate process name — no shell metacharacters
     if !process_name.is_empty() && process_name.chars().any(|c| ";|&`$(){}[]\\!#~<>\"'".contains(c)) {
         return Err("Invalid process name".to_string());
     }
@@ -2254,10 +2874,10 @@ fn exec_flush_dns() -> Result<String, String> {
     { run_command("cmd", &["/C", "ipconfig /flushdns"], 10) }
     #[cfg(target_os = "macos")]
     { run_command("sh", &["-c", "sudo dscacheutil -flushcache && sudo killall -HUP mDNSResponder && echo 'DNS cache flushed'"], 10) }
-    #[cfg(target_os = "freebsd")]
-    { run_command("sh", &["-c", "service local_unbound restart 2>/dev/null && echo 'DNS cache flushed' || echo 'DNS flush not available'"], 10) }
     #[cfg(target_os = "linux")]
     { run_command("sh", &["-c", "systemd-resolve --flush-caches 2>/dev/null && echo 'DNS cache flushed' || echo 'DNS flush not supported'"], 10) }
+    #[cfg(target_os = "freebsd")]
+    { run_command("sh", &["-c", "service local_unbound restart 2>/dev/null && echo 'DNS cache flushed' || echo 'DNS flush not supported'"], 10) }
 }
 
 fn exec_reboot_device() -> Result<String, String> {
@@ -2285,13 +2905,11 @@ fn exec_run_update_check() -> Result<String, String> {
     { run_command("cmd", &["/C", "wuauclt /detectnow & echo 'Windows Update check triggered'"], 15) }
     #[cfg(target_os = "macos")]
     { run_command("sh", &["-c", "softwareupdate -l 2>&1 | head -20"], 60) }
-    #[cfg(target_os = "freebsd")]
-    { run_command("sh", &["-c", "pkg audit 2>/dev/null | head -20; pkg upgrade -n 2>/dev/null | head -20 || echo 'No updates available'"], 60) }
     #[cfg(target_os = "linux")]
     { run_command("sh", &["-c", "apt list --upgradable 2>/dev/null | head -20 || yum check-update 2>/dev/null | head -20 || echo 'Package manager not found'"], 60) }
+    #[cfg(target_os = "freebsd")]
+    { run_command("sh", &["-c", "pkg upgrade -n 2>/dev/null | head -20 || echo 'Package manager not found'"], 60) }
 }
-
-// ─── Run Command Tool ────────────────────────────────────────────────────────
 
 fn tool_run_command(args: &Value) -> Result<Value, String> {
     let command = args["command"].as_str().unwrap_or("");
@@ -2376,8 +2994,6 @@ fn tool_run_command(args: &Value) -> Result<Value, String> {
     }
 }
 
-// ─── Clipboard Tools ────────────────────────────────────────────────────────
-
 fn tool_get_clipboard() -> Result<Value, String> {
     let mut clipboard = arboard::Clipboard::new()
         .map_err(|e| format!("Failed to access clipboard: {}", e))?;
@@ -2394,8 +3010,6 @@ fn tool_set_clipboard(args: &Value) -> Result<Value, String> {
         .map_err(|e| format!("Failed to set clipboard: {}", e))?;
     Ok(json!([{ "type": "text", "text": format!("Clipboard set ({} chars)", text.len()) }]))
 }
-
-// ─── Chat Tool ──────────────────────────────────────────────────────────────
 
 #[cfg(not(any(feature = "flutter", feature = "cli")))]
 fn tool_send_chat_message(args: &Value) -> Result<Value, String> {
@@ -2414,8 +3028,6 @@ fn tool_send_chat_message(_args: &Value) -> Result<Value, String> {
     Err("send_chat_message not available in this build".to_string())
 }
 
-// ─── Permission Tool ────────────────────────────────────────────────────────
-
 fn tool_switch_permission(args: &Value) -> Result<Value, String> {
     let conn_id = args["conn_id"].as_i64().ok_or("Missing conn_id")? as i32;
     let permission = args["permission"].as_str().ok_or("Missing permission")?;
@@ -2430,10 +3042,8 @@ fn tool_switch_permission(args: &Value) -> Result<Value, String> {
     Ok(json!([{ "type": "text", "text": format!("Permission '{}' {} for connection {}", permission, if enabled { "enabled" } else { "disabled" }, conn_id) }]))
 }
 
-// ─── Incoming Connections Tool ──────────────────────────────────────────────
-
 fn tool_list_incoming_connections() -> Result<Value, String> {
-    let clients = crate::ui_cm_interface::CLIENTS.read().unwrap();
+    let clients = crate::ui_cm_interface::CLIENTS.read().map_err(|e| format!("Lock failed: {}", e))?;
     let connections: Vec<Value> = clients.iter().map(|(id, client)| {
         json!({
             "conn_id": id,
@@ -2452,8 +3062,6 @@ fn tool_list_incoming_connections() -> Result<Value, String> {
     drop(clients);
     Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&connections).unwrap_or_default() }]))
 }
-
-// ─── File Tools ─────────────────────────────────────────────────────────────
 
 fn tool_list_local_files(args: &Value) -> Result<Value, String> {
     let path = args["path"].as_str().unwrap_or("");
@@ -2505,7 +3113,6 @@ fn tool_list_local_files(args: &Value) -> Result<Value, String> {
         }));
     }
 
-    // Sort: directories first, then alphabetical
     entries.sort_by(|a, b| {
         let a_dir = a["type"].as_str() == Some("directory");
         let b_dir = b["type"].as_str() == Some("directory");
@@ -2543,7 +3150,6 @@ fn tool_read_local_file(args: &Value) -> Result<Value, String> {
     let bytes = std::fs::read(file_path)
         .map_err(|e| format!("Failed to read file: {}", e))?;
 
-    // Try UTF-8 first, fall back to base64
     match String::from_utf8(bytes.clone()) {
         Ok(text) => Ok(json!([{ "type": "text", "text": text }])),
         Err(_) => {
@@ -2551,5 +3157,638 @@ fn tool_read_local_file(args: &Value) -> Result<Value, String> {
             let b64 = hbb_common::base64::engine::general_purpose::STANDARD.encode(&bytes);
             Ok(json!([{ "type": "text", "text": format!("base64:{}", b64) }]))
         }
+    }
+}
+
+fn tool_scroll(args: &Value) -> Result<Value, String> {
+    use enigo::{Enigo, MouseControllable};
+
+    let x = args["x"].as_i64().unwrap_or(-1) as i32;
+    let y = args["y"].as_i64().unwrap_or(-1) as i32;
+    let direction = args["direction"].as_str().unwrap_or("down");
+    let amount = args["amount"].as_i64().unwrap_or(3) as i32;
+
+    let mut enigo = Enigo::new();
+    if x >= 0 && y >= 0 {
+        enigo.mouse_move_to(x, y);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    match direction {
+        "up" => MouseControllable::mouse_scroll_y(&mut enigo, -amount),
+        "down" => MouseControllable::mouse_scroll_y(&mut enigo, amount),
+        "left" => MouseControllable::mouse_scroll_x(&mut enigo, -amount),
+        "right" => MouseControllable::mouse_scroll_x(&mut enigo, amount),
+        _ => return Err(format!("Invalid direction: {}. Use up/down/left/right.", direction)),
+    }
+
+    Ok(json!([{ "type": "text", "text": format!("Scrolled {} by {} lines at ({}, {})", direction, amount, x, y) }]))
+}
+
+fn tool_mouse_drag(args: &Value) -> Result<Value, String> {
+    use enigo::{Enigo, MouseButton, MouseControllable};
+
+    let start_x = args["start_x"].as_i64().ok_or("Missing start_x")? as i32;
+    let start_y = args["start_y"].as_i64().ok_or("Missing start_y")? as i32;
+    let end_x = args["end_x"].as_i64().ok_or("Missing end_x")? as i32;
+    let end_y = args["end_y"].as_i64().ok_or("Missing end_y")? as i32;
+    let steps = args["steps"].as_i64().unwrap_or(10).max(1) as i32;
+    let button_str = args["button"].as_str().unwrap_or("left");
+    let button = match button_str {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        _ => MouseButton::Left,
+    };
+
+    let mut enigo = Enigo::new();
+    enigo.mouse_move_to(start_x, start_y);
+    std::thread::sleep(Duration::from_millis(20));
+    enigo.mouse_down(button).map_err(|e| format!("mouse_down failed: {}", e))?;
+    std::thread::sleep(Duration::from_millis(20));
+
+    for step in 1..=steps {
+        let t = step as f64 / steps as f64;
+        let ix = start_x as f64 + (end_x - start_x) as f64 * t;
+        let iy = start_y as f64 + (end_y - start_y) as f64 * t;
+        enigo.mouse_move_to(ix as i32, iy as i32);
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    enigo.mouse_up(button);
+
+    Ok(json!([{ "type": "text", "text": format!("Dragged from ({}, {}) to ({}, {}) in {} steps", start_x, start_y, end_x, end_y, steps) }]))
+}
+
+fn tool_wait_for_screen_change(args: &Value) -> Result<Value, String> {
+    let region = parse_crop_region(args);
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(10000).min(60000);
+    let threshold = args["threshold"].as_f64().unwrap_or(1.0);
+
+    let (baseline, _, _) = capture_rgba(region)?;
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            let result = json!({ "changed": false, "elapsed_ms": start.elapsed().as_millis() as u64, "status": "timeout" });
+            return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if let Ok((current, _, _)) = capture_rgba(region) {
+            let diff = pixel_diff_percentage(&baseline, &current, 10);
+            if diff >= threshold {
+                let result = json!({ "changed": true, "elapsed_ms": start.elapsed().as_millis() as u64, "changed_percentage": (diff * 10.0).round() / 10.0 });
+                return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+            }
+        }
+    }
+}
+
+fn tool_screen_diff_summary(args: &Value) -> Result<Value, String> {
+    cleanup_diff_refs();
+
+    let reference_id = args["reference_id"].as_str();
+    let region = parse_crop_region(args);
+
+    match reference_id {
+        None => {
+
+            let (rgba, w, h) = capture_rgba(region)?;
+            let id = format!("{:x}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());
+            if let Ok(mut refs) = DIFF_REFS.lock() {
+                refs.insert(id.clone(), (rgba, w, h, Instant::now()));
+            }
+            let result = json!({ "reference_id": id, "status": "baseline_captured", "width": w, "height": h });
+            Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+        }
+        Some(ref_id) => {
+
+            let baseline = {
+                let refs = DIFF_REFS.lock().map_err(|_| "Lock error")?;
+                refs.get(ref_id).map(|(rgba, w, h, _)| (rgba.clone(), *w, *h))
+            };
+            let (base_rgba, base_w, base_h) = baseline.ok_or_else(|| format!("Reference '{}' not found or expired", ref_id))?;
+            let (current_rgba, cur_w, cur_h) = capture_rgba(region)?;
+
+            if base_w != cur_w || base_h != cur_h {
+                return Err("Screen dimensions changed since baseline capture".to_string());
+            }
+
+            let changed_pct = pixel_diff_percentage(&base_rgba, &current_rgba, 10);
+            let changed_regions = grid_diff(&base_rgba, &current_rgba, base_w, base_h);
+
+            if let Ok(mut refs) = DIFF_REFS.lock() {
+                refs.remove(ref_id);
+            }
+
+            let result = json!({
+                "changed_percentage": (changed_pct * 10.0).round() / 10.0,
+                "changed": changed_pct > 0.5,
+                "changed_regions": changed_regions,
+            });
+            Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+        }
+    }
+}
+
+fn tool_verify_action_result(args: &Value) -> Result<Value, String> {
+    let region = parse_crop_region(args);
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(3000).min(30000);
+    let threshold = args["threshold"].as_f64().unwrap_or(1.0);
+
+    let (baseline, w, h) = capture_rgba(region)?;
+    let start = Instant::now();
+
+    loop {
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            let result = json!({ "changed": false, "elapsed_ms": start.elapsed().as_millis() as u64, "changed_percentage": 0.0, "status": "no_change_detected" });
+            return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        if let Ok((current, _, _)) = capture_rgba(region) {
+            let diff = pixel_diff_percentage(&baseline, &current, 10);
+            if diff >= threshold {
+                let regions = grid_diff(&baseline, &current, w, h);
+                let result = json!({
+                    "changed": true,
+                    "elapsed_ms": start.elapsed().as_millis() as u64,
+                    "changed_percentage": (diff * 10.0).round() / 10.0,
+                    "changed_regions": regions,
+                    "status": "change_detected",
+                });
+                return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+            }
+        }
+    }
+}
+
+fn tool_start_recording() -> Result<Value, String> {
+    let mut state = WORKFLOW_STATE.lock().map_err(|e| format!("lock error: {}", e))?;
+    state.recording = true;
+    state.steps.clear();
+    state.start_time = Some(Instant::now());
+    Ok(json!([{ "type": "text", "text": "Recording started. All tool calls will be captured. Use stop_recording to finish." }]))
+}
+
+fn tool_stop_recording() -> Result<Value, String> {
+    let mut state = WORKFLOW_STATE.lock().map_err(|e| format!("lock error: {}", e))?;
+    state.recording = false;
+
+    let mut steps_json: Vec<Value> = Vec::new();
+    let mut prev_ts = 0u64;
+    for step in state.steps.drain(..) {
+        let delay_ms = step.timestamp_ms.saturating_sub(prev_ts);
+        prev_ts = step.timestamp_ms;
+        steps_json.push(json!({
+            "tool_name": step.tool_name,
+            "arguments": step.arguments,
+            "delay_ms": delay_ms,
+            "timestamp_ms": step.timestamp_ms
+        }));
+    }
+    let count = steps_json.len();
+    state.start_time = None;
+    let result = json!({ "steps": steps_json, "count": count });
+    Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+}
+
+fn tool_replay_workflow(args: &Value) -> Result<Value, String> {
+    let steps = args["steps"].as_array().ok_or("steps array is required")?;
+    let multiplier = args["delay_multiplier"].as_f64().unwrap_or(1.0);
+    let mut results = Vec::new();
+
+    for (i, step) in steps.iter().enumerate() {
+        let tool_name = step["tool_name"].as_str().unwrap_or("");
+        let arguments = &step["arguments"];
+        let delay_ms = step["delay_ms"].as_u64().unwrap_or(0);
+
+        if matches!(tool_name, "start_recording" | "stop_recording" | "replay_workflow") {
+            continue;
+        }
+
+        if i > 0 && delay_ms > 0 && multiplier > 0.0 {
+            let actual_delay = (delay_ms as f64 * multiplier) as u64;
+            std::thread::sleep(Duration::from_millis(actual_delay));
+        }
+
+        let fake_request = json!({
+            "params": { "name": tool_name, "arguments": arguments }
+        });
+        let response = handle_tools_call(&fake_request);
+        let is_error = response["result"]["isError"].as_bool().unwrap_or(false);
+        results.push(json!({
+            "step": i,
+            "tool_name": tool_name,
+            "success": !is_error
+        }));
+    }
+
+    let result = json!({ "replayed": results.len(), "results": results });
+    Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+}
+
+fn tool_read_screen_text(args: &Value) -> Result<Value, String> {
+    let region = parse_crop_region(args);
+
+    let language = args["language"].as_str().map(|s| s.to_string());
+    let (rgba, w, h) = capture_rgba(region)?;
+    let text = run_ocr(&rgba, w, h, language.as_deref())?;
+
+    Ok(json!([{ "type": "text", "text": text }]))
+}
+
+#[cfg(target_os = "windows")]
+use crate::ocr_winrt::{run_ocr, run_ocr_with_boxes};
+
+#[cfg(target_os = "macos")]
+fn run_ocr(rgba: &[u8], width: u32, height: u32, language: Option<&str>) -> Result<String, String> {
+    use objc::{class, msg_send, sel, sel_impl, runtime::Object};
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::data_provider::CGDataProvider;
+    use core_graphics::image::CGImage;
+    use foreign_types::ForeignType;
+    use std::os::raw::c_char;
+    use std::sync::Arc;
+
+    unsafe {
+        let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
+
+        let color_space = CGColorSpace::create_device_rgb();
+        let rgba_owned: Arc<Vec<u8>> = Arc::new(rgba.to_vec());
+        let provider = CGDataProvider::from_buffer(rgba_owned);
+        let bytes_per_row = width as usize * 4;
+        let cg_image = CGImage::new(
+            width as usize,
+            height as usize,
+            8,
+            32,
+            bytes_per_row,
+            &color_space,
+            core_graphics::base::kCGBitmapByteOrderDefault | core_graphics::base::kCGImageAlphaLast,
+            &provider,
+            false,
+            0,
+        );
+
+        let empty_dict: *mut Object = msg_send![class!(NSDictionary), dictionary];
+        let handler: *mut Object = {
+            let alloc: *mut Object = msg_send![class!(VNImageRequestHandler), alloc];
+            msg_send![alloc, initWithCGImage:cg_image.as_ptr() options:empty_dict]
+        };
+        if handler.is_null() {
+            let _: () = msg_send![pool, drain];
+            return Err("Failed to create VNImageRequestHandler".to_string());
+        }
+
+        let request: *mut Object = {
+            let alloc: *mut Object = msg_send![class!(VNRecognizeTextRequest), alloc];
+            msg_send![alloc, init]
+        };
+        if request.is_null() {
+            let _: () = msg_send![pool, drain];
+            return Err("Failed to create VNRecognizeTextRequest".to_string());
+        }
+
+        let _: () = msg_send![request, setRecognitionLevel: 0i64];
+
+        if let Some(lang) = language {
+            let ns_lang: *mut Object = {
+                let s: *mut Object = msg_send![class!(NSString), alloc];
+                let bytes = lang.as_bytes();
+                msg_send![s, initWithBytes:bytes.as_ptr() length:bytes.len() encoding:4u64]
+            };
+            let lang_array: *mut Object = msg_send![class!(NSArray), arrayWithObject: ns_lang];
+            let _: () = msg_send![request, setRecognitionLanguages: lang_array];
+        }
+
+        let requests: *mut Object = msg_send![class!(NSArray), arrayWithObject: request];
+        let mut error: *mut Object = std::ptr::null_mut();
+        let ok: bool = msg_send![handler, performRequests:requests error:&mut error];
+        if !ok {
+            let err_msg = if !error.is_null() {
+                let desc: *mut Object = msg_send![error, localizedDescription];
+                let cstr: *const c_char = msg_send![desc, UTF8String];
+                std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string()
+            } else {
+                "Unknown error".to_string()
+            };
+            let _: () = msg_send![pool, drain];
+            return Err(format!("Vision OCR failed: {}", err_msg));
+        }
+
+        let results: *mut Object = msg_send![request, results];
+        let text = if results.is_null() {
+            String::new()
+        } else {
+            let count: usize = msg_send![results, count];
+            let mut lines = Vec::with_capacity(count);
+            for i in 0..count {
+                let obs: *mut Object = msg_send![results, objectAtIndex: i];
+                let candidates: *mut Object = msg_send![obs, topCandidates: 1usize];
+                let cand_count: usize = msg_send![candidates, count];
+                if cand_count > 0 {
+                    let top: *mut Object = msg_send![candidates, objectAtIndex: 0usize];
+                    let ns_string: *mut Object = msg_send![top, string];
+                    if !ns_string.is_null() {
+                        let cstr: *const c_char = msg_send![ns_string, UTF8String];
+                        if !cstr.is_null() {
+                            lines.push(std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string());
+                        }
+                    }
+                }
+            }
+            lines.join("\n")
+        };
+
+        let _: () = msg_send![pool, drain];
+        Ok(text)
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn run_ocr(_rgba: &[u8], _width: u32, _height: u32, _language: Option<&str>) -> Result<String, String> {
+    Err("OCR is not supported on this platform.".to_string())
+}
+
+pub(crate) struct OcrTextBlock {
+    pub(crate) text: String,
+    pub(crate) x: i32,
+    pub(crate) y: i32,
+    pub(crate) width: i32,
+    pub(crate) height: i32,
+}
+
+#[cfg(target_os = "macos")]
+fn run_ocr_with_boxes(rgba: &[u8], width: u32, height: u32) -> Result<Vec<OcrTextBlock>, String> {
+    use objc::{class, msg_send, sel, sel_impl, runtime::Object};
+    use core_graphics::color_space::CGColorSpace;
+    use core_graphics::data_provider::CGDataProvider;
+    use core_graphics::image::CGImage;
+    use foreign_types::ForeignType;
+    use std::os::raw::c_char;
+    use std::sync::Arc;
+
+    unsafe {
+        let pool: *mut Object = msg_send![class!(NSAutoreleasePool), new];
+
+        let color_space = CGColorSpace::create_device_rgb();
+        let rgba_owned: Arc<Vec<u8>> = Arc::new(rgba.to_vec());
+        let provider = CGDataProvider::from_buffer(rgba_owned);
+        let bytes_per_row = width as usize * 4;
+        let cg_image = CGImage::new(
+            width as usize, height as usize, 8, 32, bytes_per_row,
+            &color_space,
+            core_graphics::base::kCGBitmapByteOrderDefault | core_graphics::base::kCGImageAlphaLast,
+            &provider, false, 0,
+        );
+
+        let empty_dict: *mut Object = msg_send![class!(NSDictionary), dictionary];
+        let handler: *mut Object = {
+            let alloc: *mut Object = msg_send![class!(VNImageRequestHandler), alloc];
+            msg_send![alloc, initWithCGImage:cg_image.as_ptr() options:empty_dict]
+        };
+        if handler.is_null() {
+            let _: () = msg_send![pool, drain];
+            return Err("Failed to create VNImageRequestHandler".to_string());
+        }
+
+        let request: *mut Object = {
+            let alloc: *mut Object = msg_send![class!(VNRecognizeTextRequest), alloc];
+            msg_send![alloc, init]
+        };
+        if request.is_null() {
+            let _: () = msg_send![pool, drain];
+            return Err("Failed to create VNRecognizeTextRequest".to_string());
+        }
+        let _: () = msg_send![request, setRecognitionLevel: 0i64];
+
+        let requests: *mut Object = msg_send![class!(NSArray), arrayWithObject: request];
+        let mut error: *mut Object = std::ptr::null_mut();
+        let ok: bool = msg_send![handler, performRequests:requests error:&mut error];
+        if !ok {
+            let err_msg = if !error.is_null() {
+                let desc: *mut Object = msg_send![error, localizedDescription];
+                let cstr: *const c_char = msg_send![desc, UTF8String];
+                std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string()
+            } else {
+                "Unknown error".to_string()
+            };
+            let _: () = msg_send![pool, drain];
+            return Err(format!("Vision OCR failed: {}", err_msg));
+        }
+
+        let results: *mut Object = msg_send![request, results];
+        let mut blocks = Vec::new();
+        if !results.is_null() {
+            let count: usize = msg_send![results, count];
+            let img_w = width as f64;
+            let img_h = height as f64;
+            for i in 0..count {
+                let obs: *mut Object = msg_send![results, objectAtIndex: i];
+                let candidates: *mut Object = msg_send![obs, topCandidates: 1usize];
+                let cand_count: usize = msg_send![candidates, count];
+                if cand_count > 0 {
+                    let top: *mut Object = msg_send![candidates, objectAtIndex: 0usize];
+                    let ns_string: *mut Object = msg_send![top, string];
+                    if !ns_string.is_null() {
+                        let cstr: *const c_char = msg_send![ns_string, UTF8String];
+                        if !cstr.is_null() {
+                            let text = std::ffi::CStr::from_ptr(cstr).to_string_lossy().to_string();
+
+                            #[repr(C)]
+                            struct CGRect { x: f64, y: f64, w: f64, h: f64 }
+                            let bbox: CGRect = msg_send![obs, boundingBox];
+                            let px = (bbox.x * img_w) as i32;
+                            let py = ((1.0 - bbox.y - bbox.h) * img_h) as i32;
+                            let pw = (bbox.w * img_w) as i32;
+                            let ph = (bbox.h * img_h) as i32;
+                            blocks.push(OcrTextBlock { text, x: px, y: py, width: pw, height: ph });
+                        }
+                    }
+                }
+            }
+        }
+
+        let _: () = msg_send![pool, drain];
+        Ok(blocks)
+    }
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn run_ocr_with_boxes(_rgba: &[u8], _width: u32, _height: u32) -> Result<Vec<OcrTextBlock>, String> {
+    Err("OCR is not supported in this build.".to_string())
+}
+
+fn tool_get_screen_size() -> Result<Value, String> {
+    #[cfg(windows)]
+    {
+        #[allow(clashing_extern_declarations)]
+        extern "system" {
+            fn GetSystemMetrics(idx: i32) -> i32;
+        }
+        let w = unsafe { GetSystemMetrics(0) };
+        let h = unsafe { GetSystemMetrics(1) };
+        if w > 0 && h > 0 {
+            let result = json!({ "width": w, "height": h });
+            return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+        }
+    }
+
+    {
+        use scrap::Display;
+        let displays = Display::all().map_err(|e| format!("Failed to get displays: {}", e))?;
+        if displays.is_empty() {
+            return Err("No display found".to_string());
+        }
+        let d = &displays[0];
+        let result = json!({ "width": d.width(), "height": d.height() });
+        Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+    }
+}
+
+fn parse_enigo_key(key_str: &str) -> Result<enigo::Key, String> {
+    use enigo::Key;
+    match key_str.to_lowercase().as_str() {
+        "ctrl" | "control" => Ok(Key::Control),
+        "alt" => Ok(Key::Alt),
+        "shift" => Ok(Key::Shift),
+        "meta" | "super" | "win" | "cmd" => Ok(Key::Meta),
+        "return" | "enter" => Ok(Key::Return),
+        "escape" | "esc" => Ok(Key::Escape),
+        "tab" => Ok(Key::Tab),
+        "backspace" => Ok(Key::Backspace),
+        "delete" => Ok(Key::Delete),
+        "up" => Ok(Key::UpArrow),
+        "down" => Ok(Key::DownArrow),
+        "left" => Ok(Key::LeftArrow),
+        "right" => Ok(Key::RightArrow),
+        "home" => Ok(Key::Home),
+        "end" => Ok(Key::End),
+        "pageup" => Ok(Key::PageUp),
+        "pagedown" => Ok(Key::PageDown),
+        "space" => Ok(Key::Space),
+        "f1" => Ok(Key::F1), "f2" => Ok(Key::F2), "f3" => Ok(Key::F3),
+        "f4" => Ok(Key::F4), "f5" => Ok(Key::F5), "f6" => Ok(Key::F6),
+        "f7" => Ok(Key::F7), "f8" => Ok(Key::F8), "f9" => Ok(Key::F9),
+        "f10" => Ok(Key::F10), "f11" => Ok(Key::F11), "f12" => Ok(Key::F12),
+        s if s.len() == 1 => Ok(Key::Layout(s.chars().next().unwrap())),
+        _ => Err(format!("Unknown key: {}", key_str)),
+    }
+}
+
+fn tool_key_hold(args: &Value) -> Result<Value, String> {
+    use enigo::{Enigo, KeyboardControllable};
+    let key_str = args["key"].as_str().ok_or("Missing key")?;
+    let key = parse_enigo_key(key_str)?;
+    let mut enigo = Enigo::new();
+    let _ = enigo.key_down(key);
+    Ok(json!([{ "type": "text", "text": format!("Holding {}", key_str) }]))
+}
+
+fn tool_key_release(args: &Value) -> Result<Value, String> {
+    use enigo::{Enigo, KeyboardControllable};
+    let key_str = args["key"].as_str().ok_or("Missing key")?;
+    let key = parse_enigo_key(key_str)?;
+    let mut enigo = Enigo::new();
+    enigo.key_up(key);
+    Ok(json!([{ "type": "text", "text": format!("Released {}", key_str) }]))
+}
+
+fn find_elements_on_screen(text: &str, exact: bool) -> Result<Vec<OcrTextBlock>, String> {
+    let (rgba, w, h) = capture_rgba(None)?;
+    let blocks = run_ocr_with_boxes(&rgba, w, h)?;
+    let query = text.to_lowercase();
+    let matched: Vec<OcrTextBlock> = blocks.into_iter().filter(|b| {
+        if exact {
+            b.text.to_lowercase() == query
+        } else {
+            b.text.to_lowercase().contains(&query)
+        }
+    }).collect();
+    Ok(matched)
+}
+
+fn tool_find_element(args: &Value) -> Result<Value, String> {
+    let text = args["text"].as_str().ok_or("Missing text")?;
+    let exact = args["exact"].as_bool().unwrap_or(false);
+
+    let matched = find_elements_on_screen(text, exact)?;
+
+    if matched.is_empty() {
+        return Ok(json!([{ "type": "text", "text": format!("No elements found matching \"{}\"", text) }]));
+    }
+
+    let results: Vec<Value> = matched.iter().map(|b| {
+        json!({
+            "text": b.text,
+            "x": b.x, "y": b.y,
+            "width": b.width, "height": b.height,
+            "center_x": b.x + b.width / 2,
+            "center_y": b.y + b.height / 2,
+        })
+    }).collect();
+
+    Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&json!({ "matches": results })).unwrap_or_default() }]))
+}
+
+fn tool_click_text(args: &Value) -> Result<Value, String> {
+    use enigo::{Enigo, MouseButton, MouseControllable};
+
+    let text = args["text"].as_str().ok_or("Missing text")?;
+    let button_str = args["button"].as_str().unwrap_or("left");
+    let occurrence = args["occurrence"].as_i64().unwrap_or(1).max(1) as usize;
+
+    let matched = find_elements_on_screen(text, false)?;
+
+    if matched.is_empty() {
+        return Err(format!("Text \"{}\" not found on screen", text));
+    }
+    if occurrence > matched.len() {
+        return Err(format!("Only {} occurrences found, requested #{}", matched.len(), occurrence));
+    }
+
+    let target = &matched[occurrence - 1];
+    let cx = target.x + target.width / 2;
+    let cy = target.y + target.height / 2;
+
+    let button = match button_str {
+        "right" => MouseButton::Right,
+        "middle" => MouseButton::Middle,
+        _ => MouseButton::Left,
+    };
+
+    let mut enigo = Enigo::new();
+    enigo.mouse_move_to(cx, cy);
+    std::thread::sleep(Duration::from_millis(10));
+    enigo.mouse_click(button);
+
+    let result = json!({ "clicked": true, "text": target.text, "x": cx, "y": cy });
+    Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]))
+}
+
+fn tool_wait_for_text(args: &Value) -> Result<Value, String> {
+    let text = args["text"].as_str().ok_or("Missing text")?;
+    let timeout_ms = args["timeout_ms"].as_u64().unwrap_or(10000).min(60000);
+    let interval_ms = args["interval_ms"].as_u64().unwrap_or(500).max(200);
+
+    let query = text.to_lowercase();
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed().as_millis() as u64 >= timeout_ms {
+            let result = json!({ "found": false, "elapsed_ms": start.elapsed().as_millis() as u64, "status": "timeout" });
+            return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+        }
+
+        if let Ok((rgba, w, h)) = capture_rgba(None) {
+            if let Ok(ocr_text) = run_ocr(&rgba, w, h, None) {
+                if ocr_text.to_lowercase().contains(&query) {
+                    let result = json!({ "found": true, "elapsed_ms": start.elapsed().as_millis() as u64 });
+                    return Ok(json!([{ "type": "text", "text": serde_json::to_string_pretty(&result).unwrap_or_default() }]));
+                }
+            }
+        }
+
+        std::thread::sleep(Duration::from_millis(interval_ms));
     }
 }

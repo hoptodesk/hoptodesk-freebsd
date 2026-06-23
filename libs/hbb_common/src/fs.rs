@@ -425,6 +425,8 @@ pub struct TransferJob {
     digest: FileDigest,
     #[serde(skip_serializing)]
     pub direct: bool,
+    #[serde(skip_serializing)]
+    file_error: Option<String>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
@@ -776,9 +778,11 @@ impl TransferJob {
                             self.file_is_waiting = false;
                         }
                         Err(err) => {
+                            let msg = err.to_string();
                             self.file_num += 1;
                             self.file_confirmed = false;
                             self.file_is_waiting = false;
+                            self.file_error = Some(msg);
                             return Err(err.into());
                         }
                     }
@@ -819,10 +823,12 @@ impl TransferJob {
                 .await
             {
                 Err(err) => {
+                    let msg = err.to_string();
                     self.file_num += 1;
                     self.data_stream = None;
                     self.file_confirmed = false;
                     self.file_is_waiting = false;
+                    self.file_error = Some(msg);
                     return Err(err.into());
                 }
                 Ok(n) => {
@@ -960,7 +966,7 @@ impl TransferJob {
         if self.job_skipped() {
             return Some("skipped".to_string());
         }
-        None
+        self.file_error.clone()
     }
 
     pub fn set_file_skipped(&mut self) -> bool {

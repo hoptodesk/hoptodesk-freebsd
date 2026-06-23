@@ -1,0 +1,9 @@
+[package]
+name = "system_shutdown"
+version = "4.0.1"
+edition = "2021"
+publish = false
+description = "Vendored FreeBSD-compatible reboot/shutdown helpers for the HopToDesk FreeBSD client"
+license = "MIT"
+
+[dependencies]

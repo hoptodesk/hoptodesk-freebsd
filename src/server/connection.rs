@@ -264,6 +264,8 @@ pub struct Connection {
     from_switch: bool,
     voice_call_request_timestamp: Option<NonZeroI64>,
     voice_calling: bool,
+    pending_link_invite_code: Option<String>,
+    pending_link_request_at: Option<std::time::Instant>,
     options_in_login: Option<OptionMessage>,
     #[cfg(not(any(target_os = "ios")))]
     pressed_modifiers: HashSet<rdev::Key>,
@@ -287,14 +289,7 @@ pub struct Connection {
     printer_data: Vec<(Instant, String, Vec<u8>)>,
     security_numbers: String,
     pending_invite_password_to_connect_to_inviter: Option<String>,
-    //terminal_service_id: String,
-    //terminal_persistent: bool,
-    // The user token must be set when terminal is enabled.
-    // 0 indicates SYSTEM user
-    // other values indicate current user
-    //#[cfg(not(any(target_os = "android", target_os = "ios")))]
-    //terminal_user_token: Option<TerminalUserToken>,
-    //terminal_generic_service: Option<Box<GenericService>>,
+    terminal_service_id: String,
 }
 
 impl ConnInner {
@@ -428,6 +423,8 @@ impl Connection {
             audio_sender: None,
             voice_call_request_timestamp: None,
             voice_calling: false,
+            pending_link_invite_code: None,
+            pending_link_request_at: None,
             options_in_login: None,
             #[cfg(not(any(target_os = "ios")))]
             pressed_modifiers: Default::default(),
@@ -452,11 +449,7 @@ impl Connection {
             retina: Retina::default(),
             pending_invite_password_to_connect_to_inviter: None,
             printer_data: Vec::new(),
-            //terminal_service_id: "".to_owned(),
-            //terminal_persistent: false,
-            //#[cfg(not(any(target_os = "android", target_os = "ios")))]
-            //terminal_user_token: None,
-            //terminal_generic_service: None,
+            terminal_service_id: "".to_owned(),
         };
         let addr = hbb_common::try_into_v4(addr);
         if !conn.on_open(addr).await {
@@ -508,6 +501,7 @@ impl Connection {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         std::thread::spawn(move || Self::handle_input(_rx_input, tx_cloned));
         let mut second_timer = crate::rustdesk_interval(time::interval(Duration::from_secs(1)));
+        let mut terminal_timer = crate::rustdesk_interval(time::interval(Duration::from_millis(50)));
 
         #[cfg(feature = "unix-file-copy-paste")]
         let rx_clip_holder;
@@ -754,7 +748,10 @@ impl Connection {
                             let msg = new_voice_call_request(false);
                             let _ = conn.send(msg).await;
                         }
-                        #[cfg(any(target_os = "windows", target_os = "macos"))]
+                        ipc::Data::LinkDashboardResponse(accepted) => {
+                            conn.handle_link_dashboard_response(accepted).await;
+                        }
+                        #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
                         ipc::Data::PrinterData(data) => {
                             log::info!("[pid={}] Received PrinterData via IPC: {} bytes", std::process::id(), data.len());
                             conn.send_printer_data(data).await;
@@ -897,9 +894,25 @@ impl Connection {
                             break;
                         }
                     }
+                    conn.maybe_timeout_pending_link_dashboard().await;
                     conn.file_remove_log_control.on_timer().drain(..).map(|x| conn.send_to_cm(x)).count();
                     #[cfg(feature = "hwcodec")]
                     conn.update_supported_encoding();
+                }
+                _ = terminal_timer.tick() => {
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    if conn.terminal && conn.authorized && !conn.terminal_service_id.is_empty() {
+                        let proxy = crate::terminal_service::TerminalServiceProxy::new(
+                            conn.terminal_service_id.clone(), None, None,
+                        );
+                        for response in proxy.read_outputs() {
+                            let mut msg_out = Message::new();
+                            msg_out.set_terminal_response(response);
+                            if let Err(e) = conn.send(msg_out).await {
+                                log::error!("Failed to send terminal output: {}", e);
+                            }
+                        }
+                    }
                 }
                 _ = test_delay_timer.tick() => {
                     if last_recv_time.elapsed() >= SEC30 {
@@ -1386,9 +1399,14 @@ impl Connection {
         #[allow(unused_mut)]
         let mut username = crate::platform::get_active_username();
         let mut res = LoginResponse::new();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        let dashboard_linked = !crate::dashboard::get_dashboard_user_id().is_empty();
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        let dashboard_linked = false;
         let mut pi = PeerInfo {
             username: username.clone(),
             version: VERSION.to_owned(),
+            dashboard_linked,
             ..Default::default()
         };
 
@@ -1547,7 +1565,7 @@ impl Connection {
         let mut wait_session_id_confirm = false;
         #[cfg(windows)]
         self.handle_windows_specific_session(&mut pi, &mut wait_session_id_confirm);
-        if self.file_transfer.is_some() {
+        if self.file_transfer.is_some() || self.terminal {
             res.set_peer_info(pi);
         } else if self.view_camera {
             let supported_encoding = scrap::codec::Encoder::supported_encoding();
@@ -1998,9 +2016,9 @@ impl Connection {
 			
 			if sso_enabled == "true" {
 				if !self.lr.tokenex.is_empty() && self.lr.tokenex.len() == 32 {
-					log::info!("Checking SSO login: {}", self.lr.tokenex);
+					log::info!("Checking SSO login");
 					if self.validate_sso_password(self.lr.tokenex.to_string()).await {
-						log::info!("Returning true Token: {}", self.lr.tokenex);
+						log::info!("SSO login validated");
 						return true;
 					}
 					return false;
@@ -2015,14 +2033,24 @@ impl Connection {
 				});
 				let myid = Config::get_id();
 				
-				log::info!("Checking token: {}", self.lr.tokenex);
+				log::info!("Checking access token");
 				let url = format!(
 					"https://api.hoptodesk.com/?token={}&teamid={}&id={}&remoteid={}", self.lr.tokenex, body, myid, self.lr.my_id.clone()
 				);
-				let response = crate::common::make_http_client().get(&url).send()
-					.await
-					.expect("Error checking access token");
-				let response_text = response.text().await.expect("Error reading token response");
+				let response = match crate::common::make_http_client().get(&url).send().await {
+					Ok(response) => response,
+					Err(err) => {
+						log::error!("Error checking access token: {}", err.without_url());
+						return false;
+					}
+				};
+				let response_text = match response.text().await {
+					Ok(text) => text,
+					Err(err) => {
+						log::error!("Error reading token response: {}", err.without_url());
+						return false;
+					}
+				};
 
 				log::info!("Token Status Response: {}", response_text);
 				if response_text == "OK" {
@@ -2031,7 +2059,7 @@ impl Connection {
 				return false;
 			} else {
 				if !self.lr.tokenex.is_empty() {
-					log::info!("Received token {}, but not checked. Using password instead.", self.lr.tokenex);
+					log::info!("Received token, but not checked. Using password instead.");
 				}
 			}
 		}
@@ -2229,13 +2257,35 @@ impl Connection {
                         }
                     }
                 }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Some(login_request::Union::Terminal(t)) => {
+                    if !Connection::permission("enable-terminal") {
+                        self.send_login_error("Terminal is not enabled on the remote machine").await;
+                        sleep(1.).await;
+                        return false;
+                    }
+                    self.terminal = true;
+                    let service_id = if t.service_id.is_empty() {
+                        crate::terminal_service::generate_service_id()
+                    } else {
+                        t.service_id.clone()
+                    };
+                    if let Err(e) = crate::terminal_service::get_or_create_service(
+                        service_id.clone(), false, false,
+                    ) {
+                        self.send_login_error(format!("Failed to create terminal service: {}", e)).await;
+                        sleep(1.).await;
+                        return false;
+                    }
+                    self.terminal_service_id = service_id;
+                }
                 _ => {
                     if !self.check_privacy_mode_on().await {
                         return false;
                     }
                 }
             }
-            
+
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             self.try_start_cm_ipc();
             
@@ -3180,6 +3230,21 @@ impl Connection {
                             let _ = self.send(msg_out).await;
                         }
                     }
+                    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                    Some(misc::Union::LinkDashboardRequest(req)) => {
+                        self.handle_link_dashboard_request(req.invite_code).await;
+                    }
+                    #[cfg(any(target_os = "android", target_os = "ios"))]
+                    Some(misc::Union::LinkDashboardRequest(_)) => {
+                        let mut resp = hbb_common::message_proto::LinkDashboardResponse::new();
+                        resp.accepted = false;
+                        resp.reason = "unsupported_platform".to_owned();
+                        let mut misc = Misc::new();
+                        misc.set_link_dashboard_response(resp);
+                        let mut msg = Message::new();
+                        msg.set_misc(misc);
+                        let _ = self.send(msg).await;
+                    }
                     _ => {}
                 },
                 Some(message::Union::AudioFrame(frame)) => {
@@ -3216,6 +3281,23 @@ impl Connection {
                             tx,
                         );
                         self.refresh_video_display(Some(request.display as usize));
+                    }
+                }
+                #[cfg(not(any(target_os = "android", target_os = "ios")))]
+                Some(message::Union::TerminalAction(action)) => {
+                    if self.terminal && self.authorized {
+                        let mut proxy = crate::terminal_service::TerminalServiceProxy::new(
+                            self.terminal_service_id.clone(), None, None,
+                        );
+                        match proxy.handle_action(&action) {
+                            Ok(Some(response)) => {
+                                let mut msg_out = Message::new();
+                                msg_out.set_terminal_response(response);
+                                let _ = self.send(msg_out).await;
+                            }
+                            Ok(None) => {}
+                            Err(e) => { log::error!("Terminal action error: {}", e); }
+                        }
                     }
                 }
                 _ => {}
@@ -3560,6 +3642,103 @@ impl Connection {
                 s.write()
                     .unwrap()
                     .subscribe(super::audio_service::NAME, self.inner.clone(), false);
+            }
+        }
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn handle_link_dashboard_request(&mut self, invite_code: String) {
+        let trimmed = invite_code.trim().to_string();
+        if trimmed.is_empty() {
+            self.send_link_dashboard_response(false, "invalid_invite").await;
+            return;
+        }
+        if self.pending_link_invite_code.is_some() {
+            self.send_link_dashboard_response(false, "busy").await;
+            return;
+        }
+        let (new_user_id, account_name) = match crate::dashboard::validate_invite(&trimmed).await {
+            Ok((_, user_id, _, name)) => (user_id, name),
+            Err(e) => {
+                log::warn!("LinkDashboardRequest: validate_invite failed: {}", e);
+                self.send_link_dashboard_response(false, "invalid_invite").await;
+                return;
+            }
+        };
+        let existing_user_id = crate::dashboard::get_dashboard_user_id();
+        if !existing_user_id.is_empty() && existing_user_id == new_user_id {
+            self.send_link_dashboard_response(false, "already_linked").await;
+            return;
+        }
+        let existing_account_name = if !existing_user_id.is_empty() {
+            hbb_common::config::Config::get_option("dashboard_account_name")
+        } else {
+            String::new()
+        };
+        self.pending_link_invite_code = Some(trimmed);
+        self.pending_link_request_at = Some(std::time::Instant::now());
+        self.send_to_cm(Data::LinkDashboardIncoming {
+            account_name,
+            existing_account_name,
+        });
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    async fn handle_link_dashboard_request(&mut self, _invite_code: String) {
+        self.send_link_dashboard_response(false, "not_supported").await;
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    async fn handle_link_dashboard_response(&mut self, accepted: bool) {
+        let invite_code = self.pending_link_invite_code.take();
+        self.pending_link_request_at = None;
+        if !accepted {
+            self.send_link_dashboard_response(false, "declined").await;
+            return;
+        }
+        let Some(code) = invite_code else {
+            self.send_link_dashboard_response(false, "declined").await;
+            return;
+        };
+        hbb_common::config::Config::set_option("invite_code".to_owned(), code.clone());
+        if let Err(e) = crate::dashboard::link_device().await {
+            log::warn!("LinkDashboard: link_device failed: {}", e);
+            self.send_link_dashboard_response(false, "link_failed").await;
+            return;
+        }
+        hbb_common::config::Config::set_option("invite_code".to_owned(), String::new());
+        hbb_common::config::Config::set_option("last_enrolled_invite_code".to_owned(), code);
+        let _ = crate::ipc::notify_dashboard_relinked().await;
+        self.send_link_dashboard_response(true, "").await;
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    async fn handle_link_dashboard_response(&mut self, _accepted: bool) {
+        self.pending_link_invite_code = None;
+        self.pending_link_request_at = None;
+        self.send_link_dashboard_response(false, "not_supported").await;
+    }
+
+    async fn send_link_dashboard_response(&mut self, accepted: bool, reason: &str) {
+        let mut resp = hbb_common::message_proto::LinkDashboardResponse::new();
+        resp.accepted = accepted;
+        resp.reason = reason.to_owned();
+        let mut misc = Misc::new();
+        misc.set_link_dashboard_response(resp);
+        let mut msg = Message::new();
+        msg.set_misc(misc);
+        if let Err(e) = self.send(msg).await {
+            log::warn!("Failed to send LinkDashboardResponse: {:?}", e);
+        }
+    }
+
+    async fn maybe_timeout_pending_link_dashboard(&mut self) {
+        if let Some(started) = self.pending_link_request_at {
+            if started.elapsed() >= std::time::Duration::from_secs(120) {
+                self.pending_link_invite_code = None;
+                self.pending_link_request_at = None;
+                self.send_to_cm(Data::LinkDashboardTimeout);
+                self.send_link_dashboard_response(false, "timeout").await;
             }
         }
     }
@@ -3922,7 +4101,12 @@ impl Connection {
         {
             Config::get_option("enable-remote-printing") == "Y"
         }
-        #[cfg(not(target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            Config::get_option("enable-remote-printing") != "N"
+                && crate::platform::linux::is_cups_available()
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "freebsd")))]
         {
             false
         }
@@ -3958,6 +4142,15 @@ impl Connection {
         let data = ipc::Data::Close;
         self.tx_to_cm.send(data).ok();
         self.port_forward_socket.take();
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if self.terminal && !self.terminal_service_id.is_empty() {
+            crate::terminal_service::TerminalServiceProxy::new(
+                self.terminal_service_id.clone(),
+                None,
+                None,
+            )
+            .on_disconnect();
+        }
     }
 
     // The `reason` should be consistent with `check_if_retry` if not empty
@@ -3997,7 +4190,7 @@ impl Connection {
         self.stream.send(&msg).await
     }
 
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
     async fn send_printer_data(&mut self, data: Vec<u8>) {
         use crate::server::printer_service::{PrintJob, create_print_job_messages};
         use std::sync::atomic::{AtomicI32};
@@ -4749,7 +4942,7 @@ mod raii {
                     .on_connection_open(conn_id);
             }
             // Start remote printing service when remote session starts (if enabled)
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
+            #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
             if conn_type == AuthConnType::Remote {
                 if Config::get_option("enable-remote-printing") == "Y" {
                     // On Windows, install printer here (no admin prompt needed).
@@ -4759,12 +4952,18 @@ mod raii {
                     if let Err(e) = crate::platform::install_virtual_printer() {
                         log::error!("Failed to install virtual printer on session start: {}", e);
                     }
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    if let Err(e) = crate::platform::install_virtual_printer() {
+                        log::error!("Failed to install virtual printer on session start: {}", e);
+                    }
                     #[cfg(target_os = "macos")]
                     if !crate::platform::macos::is_virtual_printer_installed() {
                         log::warn!("Remote printing enabled but printer not installed — skipping (enable in Settings to install)");
                     }
                     #[cfg(target_os = "macos")]
                     let should_start_printing = crate::platform::macos::is_virtual_printer_installed();
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    let should_start_printing = crate::platform::linux::is_virtual_printer_installed();
                     #[cfg(target_os = "windows")]
                     let should_start_printing = true;
                     if should_start_printing {
@@ -4907,7 +5106,7 @@ mod raii {
                 // Keep the virtual printer installed to avoid clipboard conflicts
                 // caused by AddPrinterW/DeletePrinter triggering clipboard events
                 // (which VirtualBox shared clipboard syncs to the host, locking it).
-                #[cfg(target_os = "windows")]
+                #[cfg(any(target_os = "windows", target_os = "linux", target_os = "freebsd"))]
                 {
                     crate::server::printer_service::stop_remote_printing();
                 }

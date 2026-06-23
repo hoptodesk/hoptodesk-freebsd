@@ -1,0 +1,56 @@
+[package]
+name = "arboard"
+version = "3.4.0"
+authors = ["Artur Kovacs <kovacs.artur.barnabas@gmail.com>", "Avi Weinstock <aweinstock314@gmail.com>", "Arboard contributors"]
+description = "Image and text handling for the OS clipboard."
+repository = "https://github.com/1Password/arboard"
+license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["clipboard", "image"]
+edition = "2021"
+rust-version = "1.67.1"
+
+[features]
+default = []
+wayland-data-control = ["wl-clipboard-rs"]
+
+[dev-dependencies]
+env_logger = "0.9.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.48.0", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+]}
+clipboard-win = "5.4.0"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# Use `relax-void-encoding`, as that allows us to pass `c_void` instead of implementing `Encode` correctly for `&CGImageRef`
+objc2 = { version = "0.5.1", features = ["relax-void-encoding"] }
+objc2-foundation = { version = "0.2.0", features = ["NSArray", "NSString", "NSEnumerator", "NSGeometry"] }
+objc2-app-kit = { version = "0.2.0", features = ["NSPasteboard", "NSPasteboardItem", "NSImage"] }
+core-graphics = { version = "0.23" }
+image = { version = "0.25", default-features = false, features = ["tiff"] }
+percent-encoding = {version  ="2.3"}
+
+[target.'cfg(all(unix, not(any(target_os="macos", target_os="android", target_os="emscripten"))))'.dependencies]
+x11rb = { version = "0.13" }
+wl-clipboard-rs = { version = "0.9", optional = true }
+image = { version = "0.25", default-features = false, features = ["png"] }
+parking_lot = "0.12"
+percent-encoding = {version  ="2.3"}
+
+[[example]]
+name = "get_image"
+
+[[example]]
+name = "set_image"
+
+[dependencies]
+log = "0.4"
+serde = "1.0"
+serde_derive = "1.0"

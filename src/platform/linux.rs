@@ -6,7 +6,7 @@ use hbb_common::{
     anyhow::anyhow,
     bail,
     config::{keys::OPTION_ALLOW_LINUX_HEADLESS, Config},
-    libc::{c_char, c_int, c_long, c_uint, c_void},
+    libc::{c_char, c_int, c_long, c_uint, c_ulong, c_void},
     log,
     message_proto::{DisplayInfo, Resolution},
     regex::{Captures, Regex},
@@ -82,10 +82,48 @@ thread_local! {
     static DISPLAY: RefCell<*mut c_void> = RefCell::new(unsafe { XOpenDisplay(std::ptr::null())});
 }
 
+#[repr(C)]
+struct XErrorEvent {
+    type_: c_int,
+    display: *mut c_void, // Display*
+    resourceid: c_ulong,  // XID
+    serial: c_ulong,
+    error_code: u8,
+    request_code: u8,
+    minor_code: u8,
+}
+
+type XErrorHandler = unsafe extern "C" fn(*mut c_void, *mut XErrorEvent) -> c_int;
+
+const X11_BAD_WINDOW: u8 = 3;
+const XDO_SUCCESS: c_int = 0;
+const XDO_ERROR: c_int = 1;
+
+static X_BAD_WINDOW_DETECTED: AtomicBool = AtomicBool::new(false);
+static X_UNEXPECTED_ERROR_DETECTED: AtomicBool = AtomicBool::new(false);
+
+unsafe extern "C" fn handle_x_error(_display: *mut c_void, event: *mut XErrorEvent) -> c_int {
+    if !event.is_null() && (*event).error_code == X11_BAD_WINDOW {
+        X_BAD_WINDOW_DETECTED.store(true, Ordering::SeqCst);
+        log::debug!("Caught X11 BadWindow error (suppressed), window was likely destroyed");
+        return 0;
+    }
+    X_UNEXPECTED_ERROR_DETECTED.store(true, Ordering::SeqCst);
+    if !event.is_null() {
+        log::warn!(
+            "X11 error: error_code={}, request_code={}, minor_code={}",
+            (*event).error_code,
+            (*event).request_code,
+            (*event).minor_code,
+        );
+    }
+    0
+}
+
 #[link(name = "X11")]
 extern "C" {
     fn XOpenDisplay(display_name: *const c_char) -> *mut c_void;
-
+    fn XSetErrorHandler(handler: Option<XErrorHandler>) -> Option<XErrorHandler>;
 }
 
 #[link(name = "Xfixes")]
@@ -207,25 +245,38 @@ pub fn get_focused_display(displays: Vec<DisplayInfo>) -> Option<usize> {
                 if libxdo_sys::xdo_get_active_window(*xdo as *const _, &mut window) != 0 {
                     return;
                 }
-                if libxdo_sys::xdo_get_window_location(
+
+                X_BAD_WINDOW_DETECTED.store(false, Ordering::SeqCst);
+                X_UNEXPECTED_ERROR_DETECTED.store(false, Ordering::SeqCst);
+                let prev_handler = XSetErrorHandler(Some(handle_x_error));
+
+                let loc_ret = libxdo_sys::xdo_get_window_location(
                     *xdo as *const _,
                     window,
                     &mut x as _,
                     &mut y as _,
                     std::ptr::null_mut(),
-                ) != 0
+                );
+                let size_ret = if loc_ret == XDO_SUCCESS {
+                    libxdo_sys::xdo_get_window_size(
+                        *xdo as *const _,
+                        window,
+                        &mut width,
+                        &mut height,
+                    )
+                } else {
+                    XDO_ERROR
+                };
+
+                XSetErrorHandler(prev_handler);
+                if X_BAD_WINDOW_DETECTED.load(Ordering::SeqCst)
+                    || X_UNEXPECTED_ERROR_DETECTED.load(Ordering::SeqCst)
+                    || loc_ret != XDO_SUCCESS
+                    || size_ret != XDO_SUCCESS
                 {
                     return;
                 }
-                if libxdo_sys::xdo_get_window_size(
-                    *xdo as *const _,
-                    window,
-                    &mut width,
-                    &mut height,
-                ) != 0
-                {
-                    return;
-                }
+
                 let center_x = x + (width / 2) as c_int;
                 let center_y = y + (height / 2) as c_int;
                 res = displays.iter().position(|d| {
@@ -1994,6 +2045,308 @@ impl Drop for WallPaperRemover {
 #[inline]
 pub fn is_x11() -> bool {
     *IS_X11
+}
+
+pub const VIRTUAL_PRINTER_NAME: &str = "HopToDesk-Printer";
+pub const PRINTER_SOCKET_PATH: &str = "/tmp/hoptodesk-printer.sock";
+
+#[cfg(target_os = "freebsd")]
+const CUPS_BACKEND_PATH: &str = "/usr/local/libexec/cups/backend/hoptodesk";
+#[cfg(not(target_os = "freebsd"))]
+const CUPS_BACKEND_PATH: &str = "/usr/lib/cups/backend/hoptodesk";
+
+const CUPS_PPD_CONTENT: &str = r#"*PPD-Adobe: "4.3"
+*FormatVersion: "4.3"
+*FileVersion: "1.0"
+*LanguageVersion: English
+*Manufacturer: "HopToDesk"
+*ModelName: "HopToDesk Printer"
+*ShortNickName: "HopToDesk Printer"
+*NickName: "HopToDesk Printer"
+*PCFileName: "hoptodesk.ppd"
+*Product: "(HopToDesk Printer)"
+*cupsFilter: "application/pdf 0 -"
+*ColorDevice: True
+*DefaultColorSpace: RGB
+*FileSystem: False
+*Throughput: "1"
+*LandscapeOrientation: Plus90
+*TTRasterizer: Type42
+*OpenUI *PageSize/Page Size: PickOne
+*DefaultPageSize: Letter
+*PageSize Letter/US Letter: "<</PageSize[612 792]/ImagingBBox null>>setpagedevice"
+*PageSize A4/A4: "<</PageSize[595 842]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageSize
+*OpenUI *PageRegion: PickOne
+*DefaultPageRegion: Letter
+*PageRegion Letter/US Letter: "<</PageSize[612 792]/ImagingBBox null>>setpagedevice"
+*PageRegion A4/A4: "<</PageSize[595 842]/ImagingBBox null>>setpagedevice"
+*CloseUI: *PageRegion
+*DefaultImageableArea: Letter
+*ImageableArea Letter/US Letter: "0 0 612 792"
+*ImageableArea A4/A4: "0 0 595 842"
+*DefaultPaperDimension: Letter
+*PaperDimension Letter/US Letter: "612 792"
+*PaperDimension A4/A4: "595 842"
+"#;
+
+fn cups_backend_script() -> String {
+    let exe = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.to_str().map(|s| s.to_string()))
+        .unwrap_or_else(|| "/usr/bin/hoptodesk".to_string());
+    format!(
+        r#"#!/bin/sh
+if [ $# -eq 0 ]; then
+    echo "direct hoptodesk \"Unknown\" \"HopToDesk Printer\""
+    exit 0
+fi
+if [ -n "$6" ]; then
+    exec {exe} --cups-print-job "$6"
+fi
+exec {exe} --cups-print-job
+"#
+    )
+}
+
+pub fn is_cups_available() -> bool {
+    if Path::new("/run/cups/cups.sock").exists() || Path::new("/var/run/cups/cups.sock").exists() {
+        return true;
+    }
+    Command::new("lpstat")
+        .arg("-r")
+        .env("LC_ALL", "C")
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("is running"))
+        .unwrap_or(false)
+}
+
+pub fn get_printers() -> Vec<String> {
+    let output = match Command::new("lpstat").arg("-a").env("LC_ALL", "C").output() {
+        Ok(o) => o,
+        Err(e) => {
+            log::warn!("lpstat failed: {}", e);
+            return Vec::new();
+        }
+    };
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    stdout
+        .lines()
+        .filter_map(|line| {
+            let name = line.split_whitespace().next()?;
+            if name == VIRTUAL_PRINTER_NAME {
+                None
+            } else {
+                Some(name.to_string())
+            }
+        })
+        .collect()
+}
+
+pub fn get_default_printer() -> Option<String> {
+    let output = Command::new("lpstat")
+        .arg("-d")
+        .env("LC_ALL", "C")
+        .output()
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let name = stdout.trim().rsplit(": ").next()?.to_string();
+    if name.is_empty() || name.contains(' ') {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+pub fn send_raw_data_to_printer(printer: Option<String>, data: Vec<u8>) -> ResultType<()> {
+    use std::io::Write;
+
+    let tmp_path = std::env::temp_dir().join(format!(
+        "HopToDesk_Print_{}.pdf",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    ));
+    std::fs::File::create(&tmp_path)?.write_all(&data)?;
+
+    let mut cmd = Command::new("lp");
+    if let Some(ref name) = printer {
+        cmd.arg("-d").arg(name);
+    }
+    cmd.arg(&tmp_path);
+
+    let status = cmd.status()?;
+    let _ = std::fs::remove_file(&tmp_path);
+    if status.success() {
+        log::info!("Print job sent successfully");
+        Ok(())
+    } else {
+        bail!("lp command failed with status {}", status)
+    }
+}
+
+pub fn is_virtual_printer_installed() -> bool {
+    Command::new("lpstat")
+        .arg("-p")
+        .arg(VIRTUAL_PRINTER_NAME)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+pub fn install_virtual_printer() -> ResultType<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    if !is_cups_available() {
+        bail!("CUPS is not available");
+    }
+
+    let script = cups_backend_script();
+    let backend_current = std::fs::read_to_string(CUPS_BACKEND_PATH)
+        .map(|content| content == script)
+        .unwrap_or(false);
+    if !backend_current {
+        let written = std::fs::File::create(CUPS_BACKEND_PATH)
+            .and_then(|mut f| f.write_all(script.as_bytes()))
+            .and_then(|_| {
+                std::fs::set_permissions(
+                    CUPS_BACKEND_PATH,
+                    std::fs::Permissions::from_mode(0o755),
+                )
+            });
+        if let Err(e) = written {
+            if !Path::new(CUPS_BACKEND_PATH).exists() {
+                bail!("CUPS backend missing and not writable: {}", e);
+            }
+            log::warn!("CUPS backend outdated and not writable: {}", e);
+        }
+    }
+
+    if is_virtual_printer_installed() {
+        log::info!("Virtual printer already installed");
+        return Ok(());
+    }
+
+    let tmp_ppd = std::env::temp_dir().join("hoptodesk-cups.ppd");
+    std::fs::File::create(&tmp_ppd)?.write_all(CUPS_PPD_CONTENT.as_bytes())?;
+
+    let status = Command::new("lpadmin")
+        .args([
+            "-p",
+            VIRTUAL_PRINTER_NAME,
+            "-v",
+            "hoptodesk://",
+            "-E",
+            "-P",
+        ])
+        .arg(&tmp_ppd)
+        .args(["-o", "printer-is-shared=false"])
+        .status()?;
+
+    let _ = std::fs::remove_file(&tmp_ppd);
+
+    if status.success() {
+        log::info!("Virtual printer installed successfully");
+        Ok(())
+    } else {
+        bail!("lpadmin failed with status {}", status)
+    }
+}
+
+pub fn uninstall_virtual_printer() -> ResultType<()> {
+    if !is_virtual_printer_installed() {
+        return Ok(());
+    }
+
+    let status = Command::new("lpadmin")
+        .args(["-x", VIRTUAL_PRINTER_NAME])
+        .status()?;
+    if status.success() {
+        let _ = std::fs::remove_file(CUPS_BACKEND_PATH);
+        log::info!("Virtual printer uninstalled");
+        Ok(())
+    } else {
+        bail!("lpadmin -x failed with status {}", status)
+    }
+}
+
+pub fn start_print_pipe_server<F: Fn(Vec<u8>) + Send + 'static>(
+    callback: F,
+) -> ResultType<std::sync::mpsc::Sender<()>> {
+    use std::io::Read;
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixListener;
+
+    let _ = std::fs::remove_file(PRINTER_SOCKET_PATH);
+
+    let listener = UnixListener::bind(PRINTER_SOCKET_PATH)?;
+    std::fs::set_permissions(
+        PRINTER_SOCKET_PATH,
+        std::fs::Permissions::from_mode(0o777),
+    )?;
+
+    let (stop_tx, stop_rx) = std::sync::mpsc::channel::<()>();
+
+    listener.set_nonblocking(true)?;
+
+    std::thread::spawn(move || {
+        log::info!("Print socket server listening on {}", PRINTER_SOCKET_PATH);
+        loop {
+            if stop_rx.try_recv().is_ok() {
+                break;
+            }
+
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    let _ = stream.set_nonblocking(false);
+                    let mut data = Vec::new();
+                    match stream.read_to_end(&mut data) {
+                        Ok(_) if !data.is_empty() => {
+                            log::info!("Received print job: {} bytes", data.len());
+                            callback(data);
+                        }
+                        Ok(_) => log::warn!("Empty print job received"),
+                        Err(e) => log::error!("Error reading print data: {}", e),
+                    }
+                }
+                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
+                Err(e) => {
+                    log::error!("Accept error: {}", e);
+                    std::thread::sleep(Duration::from_secs(1));
+                }
+            }
+        }
+        let _ = std::fs::remove_file(PRINTER_SOCKET_PATH);
+        log::info!("Print socket server stopped");
+    });
+
+    Ok(stop_tx)
+}
+
+pub fn cups_print_job(path: Option<&str>) -> ResultType<()> {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let mut data = Vec::new();
+    match path {
+        Some(p) if !p.is_empty() => {
+            std::fs::File::open(p)?.read_to_end(&mut data)?;
+        }
+        _ => {
+            std::io::stdin().read_to_end(&mut data)?;
+        }
+    }
+    if data.is_empty() {
+        bail!("Empty print job");
+    }
+    let mut stream = UnixStream::connect(PRINTER_SOCKET_PATH)?;
+    stream.write_all(&data)?;
+    Ok(())
 }
 
 #[inline]

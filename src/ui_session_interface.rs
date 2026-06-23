@@ -31,7 +31,7 @@ use std::{
     ops::{Deref, DerefMut},
     str::FromStr,
     sync::{
-        atomic::{AtomicUsize, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex, RwLock,
     },
     time::SystemTime,
@@ -85,6 +85,7 @@ pub struct Session<T: InvokeUiSession> {
     // Indicate whether the session is reconnected.
     // Used to auto start file transfer after reconnection.
     pub reconnect_count: Arc<AtomicUsize>,
+    pub request_add_to_dashboard_busy: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -113,6 +114,7 @@ enum ConnectionState {
 pub struct ConnectionRoundState {
     round: u32,
     state: ConnectionState,
+    pub ever_connected: bool,
 }
 
 impl ConnectionRoundState {
@@ -124,6 +126,7 @@ impl ConnectionRoundState {
 
     pub fn set_connected(&mut self) {
         self.state = ConnectionState::Connected;
+        self.ever_connected = true;
     }
 
     pub fn is_round_gt(&self, round: u32) -> bool {
@@ -149,6 +152,7 @@ impl Default for ConnectionRoundState {
         Self {
             round: 0,
             state: ConnectionState::Connecting,
+            ever_connected: false,
         }
     }
 }
@@ -1443,6 +1447,115 @@ impl<T: InvokeUiSession> Session<T> {
         self.send(Data::ElevateWithLogon(username, password));
     }
 
+    pub fn send_terminal_open(&self, terminal_id: i32, rows: i32, cols: i32) {
+        log::debug!("send_terminal_open: id={}, rows={}, cols={}", terminal_id, rows, cols);
+        let mut action = TerminalAction::new();
+        let mut open = OpenTerminal::new();
+        open.terminal_id = terminal_id;
+        open.rows = rows as u32;
+        open.cols = cols as u32;
+        action.set_open(open);
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn send_terminal_input(&self, terminal_id: i32, data: String) {
+        let mut action = TerminalAction::new();
+        let mut td = TerminalData::new();
+        td.terminal_id = terminal_id;
+        td.data = hbb_common::bytes::Bytes::from(data.into_bytes());
+        action.set_data(td);
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn send_terminal_close(&self, terminal_id: i32) {
+        let mut action = TerminalAction::new();
+        let mut close = CloseTerminal::new();
+        close.terminal_id = terminal_id;
+        action.set_close(close);
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    pub fn send_terminal_resize(&self, terminal_id: i32, rows: i32, cols: i32) {
+        let mut action = TerminalAction::new();
+        let mut resize = ResizeTerminal::new();
+        resize.terminal_id = terminal_id;
+        resize.rows = rows as u32;
+        resize.cols = cols as u32;
+        action.set_resize(resize);
+        let mut msg_out = Message::new();
+        msg_out.set_terminal_action(action);
+        self.send(Data::Message(msg_out));
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn has_dashboard_link(&self) -> bool {
+        crate::dashboard::is_linked() || crate::dashboard::has_pending_quick_connect_token()
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn has_dashboard_link(&self) -> bool {
+        false
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub fn request_add_to_dashboard(&self) {
+        if self.request_add_to_dashboard_busy.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        self.msgbox("connecting", "Add to my Dashboard", "Requesting invite code...", "");
+        let cloned = self.clone();
+        std::thread::spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(e) => {
+                    log::warn!("request_add_to_dashboard runtime error: {}", e);
+                    cloned.request_add_to_dashboard_busy.store(false, Ordering::SeqCst);
+                    return;
+                }
+            };
+            runtime.block_on(async move {
+                let pending = crate::dashboard::take_pending_quick_connect_token();
+                let code = if !pending.is_empty() {
+                    pending
+                } else {
+                    match crate::dashboard::get_share_invite().await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            let detail = format!("{}", e);
+                            log::warn!("get_share_invite failed: {}", detail);
+                            cloned.ui_handler.cancel_msgbox("connecting");
+                            cloned.msgbox("custom-error", "Add to my Dashboard", &detail, "");
+                            cloned.request_add_to_dashboard_busy.store(false, Ordering::SeqCst);
+                            return;
+                        }
+                    }
+                };
+                let mut req = hbb_common::message_proto::LinkDashboardRequest::new();
+                req.invite_code = code;
+                let mut misc = Misc::new();
+                misc.set_link_dashboard_request(req);
+                let mut msg_out = Message::new();
+                msg_out.set_misc(misc);
+                cloned.send(Data::Message(msg_out));
+                cloned.ui_handler.cancel_msgbox("connecting");
+                cloned.msgbox("custom-info", "Add to my Dashboard", "Request sent, waiting for the remote user to confirm.", "");
+                cloned.request_add_to_dashboard_busy.store(false, Ordering::SeqCst);
+            });
+        });
+    }
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    pub fn request_add_to_dashboard(&self) {}
+
     #[cfg(any(target_os = "ios"))]
     pub fn switch_sides(&self) {}
 
@@ -1695,6 +1808,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn update_empty_dirs(&self, _res: ReadEmptyDirsResponse) {}
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn printer_request(&self, _id: i32, _path: String) {}
+    fn handle_terminal_response(&self, _resp: TerminalResponse) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {
@@ -1727,7 +1841,43 @@ impl<T: InvokeUiSession> Interface for Session<T> {
 
     fn msgbox(&self, msgtype: &str, title: &str, text: &str, link: &str) {
         let retry = check_if_retry(msgtype, title, text);
-		self.ui_handler.msgbox(msgtype, title, text, link, retry);
+        let ever_connected = self
+            .connection_round_state
+            .lock()
+            .unwrap()
+            .ever_connected;
+        if retry
+            && msgtype == "error"
+            && title == "Connection Error"
+            && !self.is_file_transfer()
+            && !self.is_port_forward()
+            && ever_connected
+        {
+            let cloned = self.clone();
+            let round = cloned.connection_round_state.lock().unwrap().round;
+            let n = cloned.reconnect_count.load(Ordering::SeqCst) as u32;
+            let delay = std::cmp::min(1u64 << (n.min(4) + 1), 30); // 2, 4, 8, 16, 30 (cap)
+            log::info!(
+                "auto-reconnect scheduled in {}s (attempt {}): {}",
+                delay, n + 1, text
+            );
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(delay));
+                if !cloned
+                    .connection_round_state
+                    .lock()
+                    .unwrap()
+                    .is_round_gt(round)
+                {
+                    cloned.reconnect();
+                }
+            });
+            // Reuse the existing "connecting" msgtype — spinner, no OK, Cancel ok.
+            self.ui_handler
+                .msgbox("connecting", "Reconnecting", "Reconnecting...", "", false);
+            return;
+        }
+        self.ui_handler.msgbox(msgtype, title, text, link, retry);
     }
 
     fn handle_login_error(&self, err: &str) -> bool {
@@ -1740,6 +1890,14 @@ impl<T: InvokeUiSession> Interface for Session<T> {
     
     fn handle_peer_info(&self, mut pi: PeerInfo) {
         log::debug!("handle_peer_info :{:?}", pi);
+        self.reconnect_count.store(0, Ordering::SeqCst);
+        // Track whether this is the initial PeerInfo (first handle_peer_info
+        // call) so we only show the "Connected, waiting for image…" dialog
+        // once per session. Subsequent PeerInfo messages — e.g. after a
+        // screenshot request triggers the server's video-service SWITCH —
+        // would otherwise re-open the dialog, which flashes briefly before
+        // the next video frame dismisses it.
+        let is_initial_peer_info = self.lc.read().unwrap().peer_info.is_none();
         self.lc.write().unwrap().peer_info = Some(pi.clone());
         if pi.current_display as usize >= pi.displays.len() {
             pi.current_display = 0;
@@ -1782,17 +1940,27 @@ impl<T: InvokeUiSession> Interface for Session<T> {
         // Save recent peers, then push event to flutter. So flutter can refresh peer page.
         self.lc.write().unwrap().handle_peer_info(&pi);
         self.set_peer_info(&pi);
-        if self.is_file_transfer() {
+        if self.is_file_transfer() || self.is_terminal() {
             self.close_success();
-        } else if !self.is_port_forward() && !self.is_terminal() {
-            self.msgbox(
-                "success",
-                "Successful",
-                "Connected, waiting for image...",
-                "",
-            );
+        } else if !self.is_port_forward() {
+            if is_initial_peer_info {
+                self.msgbox(
+                    "success",
+                    "Successful",
+                    "Connected, waiting for image...",
+                    "",
+                );
+            } else {
+                // Later PeerInfo during an active session — don't re-show
+                // the "Connected" dialog. Close any stale one to be safe.
+                self.close_success();
+            }
         }
         self.on_connected(self.lc.read().unwrap().conn_type);
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        if self.is_terminal() {
+            self.send_terminal_open(0, 24, 80);
+        }
         #[cfg(windows)]
         {
             let mut path = std::env::temp_dir();

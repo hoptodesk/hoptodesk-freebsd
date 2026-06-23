@@ -13,6 +13,7 @@ const DASHBOARD_WS_URL: &str = "wss://dashboard.hoptodesk.com/socket.io/";
 const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 const RECONNECT_DELAY_BASE_SECS: u64 = 1;
 const RECONNECT_DELAY_MAX_SECS: u64 = 10;
+const WS_SEND_TIMEOUT_SECS: u64 = 15;
 
 static DASHBOARD_RUNNING: AtomicBool = AtomicBool::new(false);
 static IN_SESSION: AtomicBool = AtomicBool::new(false);
@@ -21,6 +22,22 @@ static TICKET_REPLY_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub fn is_linked() -> bool {
     !Config::get_option("dashboard_user_id").is_empty()
+}
+
+pub fn set_pending_quick_connect_token(token: &str) {
+    Config::set_option("pending_quick_connect_token".to_owned(), token.to_owned());
+}
+
+pub fn has_pending_quick_connect_token() -> bool {
+    !Config::get_option("pending_quick_connect_token").is_empty()
+}
+
+pub fn take_pending_quick_connect_token() -> String {
+    let token = Config::get_option("pending_quick_connect_token");
+    if !token.is_empty() {
+        Config::set_option("pending_quick_connect_token".to_owned(), String::new());
+    }
+    token
 }
 
 pub fn get_invite_code() -> String {
@@ -34,6 +51,12 @@ pub fn get_invite_code() -> String {
             return code;
         }
     }
+    if let Ok(code) = std::fs::read_to_string(Config::shared_path("InviteCode.toml")) {
+        let code = code.trim().to_string();
+        if !code.is_empty() {
+            return code;
+        }
+    }
     String::new()
 }
 
@@ -41,11 +64,41 @@ pub fn get_dashboard_user_id() -> String {
     Config::get_option("dashboard_user_id")
 }
 
-pub async fn validate_invite(invite_code: &str) -> ResultType<(String, String, String)> {
+fn dashboard_ws_url() -> String {
+    let v = Config::get_option("dashboard-ws-url");
+    if v.is_empty() { DASHBOARD_WS_URL.to_string() } else { v }
+}
+
+fn dashboard_api_base() -> String {
+    let v = Config::get_option("dashboard-api-url");
+    if v.is_empty() { DASHBOARD_API_URL.to_string() } else { v }
+}
+
+fn apply_dashboard_endpoint(key: &str, field: &serde_json::Value, scheme: &str, path: &str) {
+    let desired = match (field["host"].as_str(), field["port"].as_str()) {
+        (Some(host), Some(port)) => format!("{}://{}:{}{}", scheme, host, port, path),
+        _ => String::new(),
+    };
+    if Config::get_option(key) != desired {
+        Config::set_option(key.to_owned(), desired);
+    }
+}
+
+async fn refresh_dashboard_endpoints() {
+    let map = match hbb_common::api::call_api().await {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    apply_dashboard_endpoint("dashboard-ws-url", &map["dashboardws"], "wss", "/socket.io/");
+    apply_dashboard_endpoint("dashboard-api-url", &map["dashboardapi"], "https", "/api");
+}
+
+pub async fn validate_invite(invite_code: &str) -> ResultType<(String, String, String, String)> {
+    refresh_dashboard_endpoints().await;
     let client = crate::common::make_http_client();
     let url = format!(
         "{}?action=validateInvite&invite_code={}",
-        DASHBOARD_API_URL, invite_code
+        dashboard_api_base(), invite_code
     );
     let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
     if resp["success"].as_bool() != Some(true) {
@@ -61,10 +114,46 @@ pub async fn validate_invite(invite_code: &str) -> ResultType<(String, String, S
         .unwrap_or("")
         .to_string();
     let invite_type = invite["invite_type"].as_str().unwrap_or("standard").to_string();
+    let account_name = invite["account_name"]
+        .as_str()
+        .unwrap_or("")
+        .to_string();
     if dashboard_user_id.is_empty() || dashboard_user_id.starts_with("DASH-") {
         hbb_common::bail!("Invalid dashboard_user_id: {}", dashboard_user_id);
     }
-    Ok((enrollment_token, dashboard_user_id, invite_type))
+    Ok((enrollment_token, dashboard_user_id, invite_type, account_name))
+}
+
+pub async fn get_share_invite() -> ResultType<String> {
+    refresh_dashboard_endpoints().await;
+    let cached = Config::get_option("share_invite_code");
+    if !cached.is_empty() {
+        return Ok(cached);
+    }
+    let dashboard_user_id = get_dashboard_user_id();
+    if dashboard_user_id.is_empty() {
+        hbb_common::bail!("Not linked to a dashboard");
+    }
+    let device_id = Config::get_id();
+    if device_id.is_empty() {
+        hbb_common::bail!("Device ID not available");
+    }
+    let client = crate::common::make_http_client();
+    let url = format!("{}?action=getShareInvite", dashboard_api_base());
+    let params: Vec<(&str, &str)> = vec![
+        ("device_id", &device_id),
+        ("dashboard_user_id", &dashboard_user_id),
+    ];
+    let resp: serde_json::Value = client.post(&url).form(&params).send().await?.json().await?;
+    if resp["success"].as_bool() != Some(true) {
+        hbb_common::bail!("getShareInvite failed: {}", resp);
+    }
+    let code = resp["invite_code"].as_str().unwrap_or("").to_string();
+    if code.is_empty() {
+        hbb_common::bail!("getShareInvite returned empty code");
+    }
+    Config::set_option("share_invite_code".to_owned(), code.clone());
+    Ok(code)
 }
 
 pub async fn register_device(
@@ -76,7 +165,7 @@ pub async fn register_device(
     mac: &str,
 ) -> ResultType<String> {
     let client = crate::common::make_http_client();
-    let url = format!("{}?action=registerDevice", DASHBOARD_API_URL);
+    let url = format!("{}?action=registerDevice", dashboard_api_base());
     let mut params: Vec<(&str, &str)> = vec![
         ("device_id", device_id),
         ("device_name", device_name),
@@ -99,6 +188,21 @@ pub async fn register_device(
         .unwrap_or("")
         .to_string();
     log::info!("Device registered with dashboard successfully (user_id={})", dashboard_user_id);
+
+    // Apply deployment profile settings if provided
+    if let Some(settings) = resp.get("deployment_settings") {
+        if settings["enable_unattended_access"].as_bool() == Some(true) {
+            Config::set_option("unattended-access".to_owned(), "true".to_owned());
+            log::info!("Deployment profile: enabled unattended access");
+        }
+        if let Some(password) = settings["default_password"].as_str() {
+            if !password.is_empty() {
+                Config::set_permanent_password(password);
+                log::info!("Deployment profile: set default password");
+            }
+        }
+    }
+
     Ok(dashboard_user_id)
 }
 
@@ -106,7 +210,7 @@ pub async fn get_network_settings(invite_code: &str) -> ResultType<()> {
     let client = crate::common::make_http_client();
     let url = format!(
         "{}?action=getNetworkSettingsByInvite&invite_code={}",
-        DASHBOARD_API_URL, invite_code
+        dashboard_api_base(), invite_code
     );
     let resp: serde_json::Value = client.get(&url).send().await?.json().await?;
     if resp["success"].as_bool() != Some(true) {
@@ -115,20 +219,38 @@ pub async fn get_network_settings(invite_code: &str) -> ResultType<()> {
     }
     let network_type = resp["network_type"].as_str().unwrap_or("hoptodesk");
     if network_type == "custom" {
-        let api_json = serde_json::json!({
-            "turnservers": [{
-                "protocol": "turn",
-                "host": resp["turn_host"].as_str().unwrap_or(""),
-                "port": resp["turn_port"].as_str().unwrap_or(""),
-                "username": resp["turn_username"].as_str().unwrap_or(""),
-                "password": resp["turn_password"].as_str().unwrap_or("")
-            }],
-            "rendezvous": {
-                "host": resp["rendezvous_host"].as_str().unwrap_or(""),
-                "port": resp["rendezvous_port"].as_str().unwrap_or("")
-            },
-            "none": "none"
-        });
+        let api_json = if resp["api_json"].is_object() {
+            resp["api_json"].clone()
+        } else {
+            let mut api_map = serde_json::Map::new();
+            api_map.insert("none".to_owned(), serde_json::json!("none"));
+            let turn_host = resp["turn_host"].as_str().unwrap_or("");
+            if !turn_host.is_empty() {
+                let turn_protocol = resp["turn_protocol"].as_str().filter(|s| !s.is_empty()).unwrap_or("turn");
+                api_map.insert("turnservers".to_owned(), serde_json::json!([{
+                    "protocol": turn_protocol,
+                    "host": turn_host,
+                    "port": resp["turn_port"].as_str().unwrap_or(""),
+                    "username": resp["turn_username"].as_str().unwrap_or(""),
+                    "password": resp["turn_password"].as_str().unwrap_or("")
+                }]));
+            }
+            let rendezvous_host = resp["rendezvous_host"].as_str().unwrap_or("");
+            if !rendezvous_host.is_empty() {
+                api_map.insert("rendezvous".to_owned(), serde_json::json!({
+                    "host": rendezvous_host,
+                    "port": resp["rendezvous_port"].as_str().unwrap_or("")
+                }));
+            }
+            let rendezvousssl_host = resp["rendezvousssl_host"].as_str().unwrap_or("");
+            if !rendezvousssl_host.is_empty() {
+                api_map.insert("rendezvousssl".to_owned(), serde_json::json!({
+                    "host": rendezvousssl_host,
+                    "port": resp["rendezvousssl_port"].as_str().unwrap_or("")
+                }));
+            }
+            serde_json::Value::Object(api_map)
+        };
         let api_json_path = Config::path("api.json");
         if let Some(parent) = api_json_path.parent() {
             if !parent.exists() {
@@ -137,19 +259,41 @@ pub async fn get_network_settings(invite_code: &str) -> ResultType<()> {
         }
         std::fs::write(&api_json_path, serde_json::to_string_pretty(&api_json)?)?;
         log::info!("Wrote custom network config to {:?}", api_json_path);
+        Config::set_option("api-cache".to_owned(), String::new());
+        hbb_common::api::erase_api().await;
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        crate::rendezvous_mediator::RendezvousMediator::restart();
     }
     Ok(())
 }
 
+fn get_prefilled_enrollment_token() -> String {
+    std::fs::read_to_string(Config::shared_path("EnrollmentToken.toml"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default()
+}
+
 pub async fn link_device() -> ResultType<()> {
     let invite_code = get_invite_code();
-    if invite_code.is_empty() {
-        hbb_common::bail!("No invite code set");
+    let prefilled_token = get_prefilled_enrollment_token();
+
+    if invite_code.is_empty() && prefilled_token.is_empty() {
+        hbb_common::bail!("No invite code or enrollment token set");
     }
 
-    log::info!("Linking device with invite code: {}...", &invite_code[..invite_code.len().min(8)]);
-
-    let (enrollment_token, dashboard_user_id, _invite_type) = validate_invite(&invite_code).await?;
+    let (enrollment_token, dashboard_user_id) = if !prefilled_token.is_empty() {
+        log::info!("Using pre-supplied enrollment token");
+        (prefilled_token, String::new())
+    } else {
+        log::info!("Linking device with invite code: {}...", &invite_code[..invite_code.len().min(8)]);
+        let (t, u, _, name) = validate_invite(&invite_code).await?;
+        if !name.is_empty() {
+            Config::set_option("dashboard_account_name".to_owned(), name);
+        }
+        (t, u)
+    };
     if !enrollment_token.is_empty() {
         log::info!("Got enrollment token for secure registration");
     }
@@ -182,8 +326,10 @@ pub async fn link_device() -> ResultType<()> {
         log::info!("Dashboard user ID stored: {}", final_user_id);
     }
 
-    if let Err(e) = get_network_settings(&invite_code).await {
-        log::warn!("Failed to get network settings: {}", e);
+    if !invite_code.is_empty() {
+        if let Err(e) = get_network_settings(&invite_code).await {
+            log::warn!("Failed to get network settings: {}", e);
+        }
     }
 
     Ok(())
@@ -244,6 +390,41 @@ fn get_mac_address() -> String {
     "".to_string()
 }
 
+fn apply_pending_proxy() {
+    let path = Config::shared_path("Proxy.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&content) {
+        let url = v["url"].as_str().unwrap_or("").trim().to_string();
+        if !url.is_empty() {
+            let username = v["username"].as_str().unwrap_or("").to_string();
+            let password = v["password"].as_str().unwrap_or("").to_string();
+            let (proxy_type, proxy) = if let Some(idx) = url.find("://") {
+                let scheme = url[..idx].to_lowercase();
+                let host = url[idx + 3..].to_string();
+                let pt = match scheme.as_str() {
+                    "http" | "https" => hbb_common::config::ProxyType::Http,
+                    "socks5" | "socks" | "socks5h" => hbb_common::config::ProxyType::Socks5,
+                    _ => hbb_common::config::ProxyType::Auto,
+                };
+                (pt, host)
+            } else {
+                (hbb_common::config::ProxyType::Auto, url.clone())
+            };
+            Config::set_socks(Some(hbb_common::config::Socks5Server {
+                proxy,
+                username,
+                password,
+                proxy_type,
+            }));
+            log::info!("Applied deployment proxy settings");
+        }
+    }
+    let _ = std::fs::remove_file(&path);
+}
+
 #[tokio::main(flavor = "current_thread")]
 pub async fn start() {
     if DASHBOARD_RUNNING.swap(true, Ordering::SeqCst) {
@@ -251,14 +432,32 @@ pub async fn start() {
         return;
     }
 
-    if !get_invite_code().is_empty() {
+    apply_pending_proxy();
+
+    refresh_dashboard_endpoints().await;
+
+    if !get_invite_code().is_empty() || !get_prefilled_enrollment_token().is_empty() {
+        let used_code = get_invite_code();
         if let Err(e) = link_device().await {
             log::error!("Failed to link device: {}", e);
             DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
             return;
         }
         Config::set_option("invite_code".to_owned(), String::new());
+        Config::set_option("last_enrolled_invite_code".to_owned(), used_code);
         std::fs::remove_file(Config::path("InviteCode.toml")).ok();
+        std::fs::remove_file(Config::shared_path("InviteCode.toml")).ok();
+        std::fs::remove_file(Config::shared_path("EnrollmentToken.toml")).ok();
+        let sentinel = Config::shared_path("Enrolled.toml");
+        if let Some(parent) = sentinel.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        let body = format!(
+            "user_id={}\ndevice_id={}\n",
+            get_dashboard_user_id(),
+            Config::get_id()
+        );
+        std::fs::write(&sentinel, body).ok();
     }
 
     let dashboard_user_id = get_dashboard_user_id();
@@ -291,6 +490,7 @@ pub async fn start() {
 
         if get_dashboard_user_id().is_empty() {
             log::info!("Device unlinked from dashboard, stopping reconnection");
+            DASHBOARD_RUNNING.store(false, Ordering::SeqCst);
             break;
         }
 
@@ -301,23 +501,37 @@ pub async fn start() {
 }
 
 async fn dashboard_ws_loop(dashboard_user_id: &str) -> ResultType<()> {
-    use futures::{SinkExt, StreamExt};
+    use futures::StreamExt;
     use tokio_tungstenite::tungstenite::Message as WsMessage;
 
     let url = format!(
         "{}?dashboard_user_id={}&EIO=4&transport=websocket",
-        DASHBOARD_WS_URL, dashboard_user_id
+        dashboard_ws_url(), dashboard_user_id
     );
     log::info!("Connecting to dashboard WebSocket");
 
     let tls_opts = Some(tokio_tungstenite::Connector::NativeTls(
         native_tls::TlsConnector::builder()
-            .danger_accept_invalid_certs(true)
+            .request_alpns(&["http/1.1"])
             .build()?,
     ));
 
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http::header::{HeaderValue, ACCEPT_LANGUAGE, USER_AGENT};
+    let mut request = url.as_str().into_client_request()?;
+    {
+        let headers = request.headers_mut();
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            ),
+        );
+        headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+    }
+
     let (ws_stream, _) =
-        tokio_tungstenite::connect_async_tls_with_config(&url, None, false, tls_opts)
+        tokio_tungstenite::connect_async_tls_with_config(request, None, false, tls_opts)
             .await?;
 
     log::info!("Dashboard WebSocket connected");
@@ -331,11 +545,8 @@ async fn dashboard_ws_loop(dashboard_user_id: &str) -> ResultType<()> {
     if !open_text.starts_with('0') {
         hbb_common::bail!("Expected Engine.IO open packet, got: {}", open_text);
     }
-    log::debug!("Engine.IO open: {}", open_text);
 
-    sender
-        .send(WsMessage::Text("40/device,".to_string()))
-        .await?;
+    send_ws_message(&mut sender, WsMessage::Text("40/device,".to_string())).await?;
 
     let ack_msg = receiver
         .next()
@@ -379,7 +590,7 @@ async fn dashboard_ws_loop(dashboard_user_id: &str) -> ResultType<()> {
                 match msg {
                     Some(Ok(WsMessage::Text(text))) => {
                         if text == "2" {
-                            sender.send(WsMessage::Text("3".to_string())).await?;
+                            send_ws_message(&mut sender, WsMessage::Text("3".to_string())).await?;
                             continue;
                         }
                         if text == "3" {
@@ -446,6 +657,22 @@ async fn dashboard_ws_loop(dashboard_user_id: &str) -> ResultType<()> {
     Ok(())
 }
 
+async fn send_ws_message<S>(
+    sender: &mut S,
+    msg: tokio_tungstenite::tungstenite::Message,
+) -> ResultType<()>
+where
+    S: futures::Sink<tokio_tungstenite::tungstenite::Message, Error = tokio_tungstenite::tungstenite::Error>
+        + Unpin,
+{
+    use futures::SinkExt;
+    match tokio::time::timeout(Duration::from_secs(WS_SEND_TIMEOUT_SECS), sender.send(msg)).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e.into()),
+        Err(_) => hbb_common::bail!("WS send timed out after {}s", WS_SEND_TIMEOUT_SECS),
+    }
+}
+
 async fn send_socketio_event<S>(
     sender: &mut S,
     event: &str,
@@ -455,12 +682,8 @@ where
     S: futures::Sink<tokio_tungstenite::tungstenite::Message, Error = tokio_tungstenite::tungstenite::Error>
         + Unpin,
 {
-    use futures::SinkExt;
     let payload = format!("42/device,[{},{}]", serde_json::json!(event), data);
-    sender
-        .send(tokio_tungstenite::tungstenite::Message::Text(payload))
-        .await?;
-    Ok(())
+    send_ws_message(sender, tokio_tungstenite::tungstenite::Message::Text(payload)).await
 }
 
 fn handle_incoming_message(text: &str) -> ResultType<Option<(String, serde_json::Value)>> {
@@ -478,9 +701,7 @@ fn handle_incoming_message(text: &str) -> ResultType<Option<(String, serde_json:
                             }
                         }
                     }
-                    "heartbeat_ack" => {
-                        log::debug!("Dashboard: heartbeat acknowledged");
-                    }
+                    "heartbeat_ack" => {}
                     "unlinked" => {
                         log::warn!("Dashboard: device has been permanently deleted, unlinking");
                         Config::set_option("dashboard_user_id".to_owned(), String::new());
@@ -584,7 +805,7 @@ pub fn submit_ticket(
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let url = format!("{}?action=submitTicket", DASHBOARD_API_URL);
+    let url = format!("{}?action=submitTicket", dashboard_api_base());
     let resp: serde_json::Value = client
         .post(&url)
         .form(&[
@@ -610,6 +831,27 @@ pub fn submit_ticket(
     Ok(ticket_id)
 }
 
+pub fn fetch_support_contact() -> ResultType<serde_json::Value> {
+    let dashboard_user_id = get_dashboard_user_id();
+    if dashboard_user_id.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let client = reqwest::blocking::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()?;
+    let url = format!(
+        "{}?action=getBranding&dashboard_user_id={}",
+        dashboard_api_base(), dashboard_user_id
+    );
+    let resp: serde_json::Value = client.get(&url).send()?.json()?;
+    let b = &resp["branding"];
+    Ok(serde_json::json!({
+        "name": b["company_name"].as_str().unwrap_or(""),
+        "support_email": b["support_email"].as_str().unwrap_or(""),
+        "phone": b["phone_number"].as_str().unwrap_or(""),
+    }))
+}
+
 pub fn get_my_tickets() -> ResultType<serde_json::Value> {
     let device_id = Config::get_id();
     let dashboard_user_id = get_dashboard_user_id();
@@ -619,7 +861,7 @@ pub fn get_my_tickets() -> ResultType<serde_json::Value> {
         .build()?;
     let url = format!(
         "{}?action=getMyTickets&device_id={}&dashboard_user_id={}",
-        DASHBOARD_API_URL, device_id, dashboard_user_id
+        dashboard_api_base(), device_id, dashboard_user_id
     );
     let resp: serde_json::Value = client.get(&url).send()?.json()?;
     if resp["success"].as_bool() != Some(true) {
@@ -637,7 +879,7 @@ pub fn get_conversation(ticket_id: i64) -> ResultType<serde_json::Value> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let url = format!("{}?action=getCustomerConversation", DASHBOARD_API_URL);
+    let url = format!("{}?action=getCustomerConversation", dashboard_api_base());
     let resp: serde_json::Value = client
         .post(&url)
         .form(&[
@@ -663,7 +905,7 @@ pub fn get_attachments(ticket_id: i64) -> ResultType<serde_json::Value> {
         .build()?;
     let url = format!(
         "{}?action=getAttachments&ticket_id={}&device_id={}",
-        DASHBOARD_API_URL, ticket_id, device_id
+        dashboard_api_base(), ticket_id, device_id
     );
     let resp: serde_json::Value = client.get(&url).send()?.json()?;
     if resp["success"].as_bool() != Some(true) {
@@ -675,13 +917,13 @@ pub fn get_attachments(ticket_id: i64) -> ResultType<serde_json::Value> {
     Ok(resp["attachments"].clone())
 }
 
-pub fn add_reply(ticket_id: i64, message: &str) -> ResultType<()> {
+pub fn add_reply(ticket_id: i64, message: &str) -> ResultType<bool> {
     let device_id = Config::get_id();
 
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let url = format!("{}?action=addCustomerReply", DASHBOARD_API_URL);
+    let url = format!("{}?action=addCustomerReply", dashboard_api_base());
     let resp: serde_json::Value = client
         .post(&url)
         .form(&[
@@ -697,7 +939,7 @@ pub fn add_reply(ticket_id: i64, message: &str) -> ResultType<()> {
             resp["error"].as_str().unwrap_or("unknown error")
         );
     }
-    Ok(())
+    Ok(resp["reopened"].as_bool().unwrap_or(false))
 }
 
 pub fn upload_attachment(ticket_id: i64, file_path: &str) -> ResultType<()> {
@@ -729,7 +971,7 @@ pub fn upload_attachment(ticket_id: i64, file_path: &str) -> ResultType<()> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(120))
         .build()?;
-    let url = format!("{}?action=customerUploadAttachment", DASHBOARD_API_URL);
+    let url = format!("{}?action=customerUploadAttachment", dashboard_api_base());
 
     let part = reqwest::blocking::multipart::Part::bytes(encrypted)
         .file_name(file_name.clone())
@@ -766,6 +1008,6 @@ pub fn get_attachment_download_url(download_url: &str) -> String {
     if download_url.starts_with("http") {
         download_url.to_string()
     } else {
-        format!("{}/{}", DASHBOARD_API_URL, download_url)
+        format!("{}/{}", dashboard_api_base(), download_url)
     }
 }

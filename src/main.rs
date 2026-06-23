@@ -276,6 +276,8 @@ fn main() {
 			.to_string_lossy()
 			.to_string();
 
+			let is_main_launch = std::env::args().nth(1).map_or(true, |a| !a.starts_with("--"));
+			if is_main_launch {
 			if let Some(id_start) = exe_file_name.find('-') {
 				let id_part = &exe_file_name[id_start + 1..];
 				let mut id_end = 0;
@@ -292,19 +294,26 @@ fn main() {
 				if has_uppercase && id_end == 16 {
 					// Invite code: 16 alphanumeric chars with at least one uppercase letter
 					let invite_code = &id_part[..id_end];
-					hbb_common::config::Config::set_option("invite_code".to_owned(), invite_code.to_string());
+					if Config::get_option("last_enrolled_invite_code") != invite_code {
+						hbb_common::config::Config::set_option("invite_code".to_owned(), invite_code.to_string());
+						Config::set_option("last_enrolled_invite_code".to_owned(), invite_code.to_string());
+					}
 				} else if !has_uppercase && (id_end == 16 || id_end == 32) {
 					// TeamID: 16 or 32 lowercase+digit chars (no uppercase)
 					let team_id = &id_part[..id_end];
-					let config_path = Config::path("TeamID.toml");
-					if let Some(parent_dir) = config_path.parent() {
-						if !parent_dir.exists() {
-							fs::create_dir_all(parent_dir)
-								.expect("Failed to create directory for TeamID.toml");
+					let existing_team_id = fs::read_to_string(&Config::path("TeamID.toml")).unwrap_or_default();
+					if existing_team_id.trim() != team_id {
+						let config_path = Config::path("TeamID.toml");
+						if let Some(parent_dir) = config_path.parent() {
+							if !parent_dir.exists() {
+								fs::create_dir_all(parent_dir)
+									.expect("Failed to create directory for TeamID.toml");
+							}
 						}
+						fs::write(&config_path, team_id).expect("Failed to write team ID to file");
 					}
-					fs::write(&Config::path("TeamID.toml"), team_id).expect("Failed to write team ID to file");
 				}
+			}
 			}
 
 		// macOS: binary inside .app bundle never has invite code in its name,
@@ -312,18 +321,20 @@ fn main() {
 		#[cfg(target_os = "macos")]
 		{
 			if hbb_common::config::Config::get_option("invite_code").is_empty()
-				&& hbb_common::config::Config::get_option("dashboard_user_id").is_empty()
 				&& !std::path::Path::new(&hbb_common::config::Config::path("InviteCode.toml")).exists()
 			{
 				if let Some(code) = find_macos_invite_code() {
-					// Write to InviteCode.toml (survives config sync from root service)
-					let invite_path = hbb_common::config::Config::path("InviteCode.toml");
-					if let Some(parent) = invite_path.parent() {
-						fs::create_dir_all(parent).ok();
+					let last = hbb_common::config::Config::get_option("last_enrolled_invite_code");
+					if last != code {
+						// Write to InviteCode.toml (survives config sync from root service)
+						let invite_path = hbb_common::config::Config::path("InviteCode.toml");
+						if let Some(parent) = invite_path.parent() {
+							fs::create_dir_all(parent).ok();
+						}
+						fs::write(&invite_path, &code).ok();
+						// Also set in-memory for immediate use
+						hbb_common::config::Config::set_option("invite_code".to_owned(), code);
 					}
-					fs::write(&invite_path, &code).ok();
-					// Also set in-memory for immediate use
-					hbb_common::config::Config::set_option("invite_code".to_owned(), code);
 				}
 			}
 		}
@@ -332,16 +343,18 @@ fn main() {
 		#[cfg(any(target_os = "linux", target_os = "freebsd"))]
 		{
 			if hbb_common::config::Config::get_option("invite_code").is_empty()
-				&& hbb_common::config::Config::get_option("dashboard_user_id").is_empty()
 				&& !std::path::Path::new(&hbb_common::config::Config::path("InviteCode.toml")).exists()
 			{
 				if let Some(code) = find_linux_invite_code() {
-					let invite_path = hbb_common::config::Config::path("InviteCode.toml");
-					if let Some(parent) = invite_path.parent() {
-						fs::create_dir_all(parent).ok();
+					let last = hbb_common::config::Config::get_option("last_enrolled_invite_code");
+					if last != code {
+						let invite_path = hbb_common::config::Config::path("InviteCode.toml");
+						if let Some(parent) = invite_path.parent() {
+							fs::create_dir_all(parent).ok();
+						}
+						fs::write(&invite_path, &code).ok();
+						hbb_common::config::Config::set_option("invite_code".to_owned(), code);
 					}
-					fs::write(&invite_path, &code).ok();
-					hbb_common::config::Config::set_option("invite_code".to_owned(), code);
 				}
 			}
 		}

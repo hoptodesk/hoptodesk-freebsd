@@ -955,7 +955,8 @@ pub fn get_audit_server(api: String, custom: String, typ: String) -> String {
 
 /// Build an HTTP client that routes through the proxy when configured.
 pub fn make_http_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+    let mut builder =
+        reqwest::Client::builder().connect_timeout(std::time::Duration::from_secs(10));
     if let Some(conf) = config::Config::get_socks() {
         let proxy_url = hbb_common::proxy::proxy_url(&conf);
         if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {

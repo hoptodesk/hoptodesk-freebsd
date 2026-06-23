@@ -1,5 +1,5 @@
 use crate::{
-    config::{Config, NetworkType},
+    config::{Config, NetworkType, ProxyType},
     tcp::FramedStream,
     udp::FramedSocket,
     ResultType,
@@ -107,6 +107,10 @@ pub async fn connect_tcp_local<
     ms_timeout: u64,
 ) -> ResultType<FramedStream> {
     if let Some(conf) = Config::get_socks() {
+        if conf.proxy_type == ProxyType::Http || (conf.proxy_type == ProxyType::Auto && crate::proxy::get_resolved_proxy_type() == Some(ProxyType::Http)) {
+            log::info!("Connecting via HTTP proxy");
+            return FramedStream::connect_via_proxy(&conf, &target.to_string(), local, ms_timeout).await;
+        }
 		log::info!("Connecting via SOCKS proxy");
 		return FramedStream::connect(
             conf.proxy.as_str(),
@@ -191,6 +195,10 @@ async fn new_udp<T: ToSocketAddrs>(local: T, ms_timeout: u64) -> ResultType<Fram
     match Config::get_socks() {
         None => Ok(FramedSocket::new(local).await?),
         Some(conf) => {
+            if conf.proxy_type == ProxyType::Http || (conf.proxy_type == ProxyType::Auto && crate::proxy::get_resolved_proxy_type() == Some(ProxyType::Http)) {
+                crate::log::warn!("HTTP proxy cannot tunnel UDP; falling back to direct connection");
+                return Ok(FramedSocket::new(local).await?);
+            }
             let socket = FramedSocket::new_proxy(
                 conf.proxy.as_str(),
                 local,

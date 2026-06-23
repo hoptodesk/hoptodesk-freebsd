@@ -500,6 +500,15 @@ pub fn set_option(key: String, value: String) {
                 }
             }
         }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            if value != "Y" {
+                crate::server::printer_service::stop_remote_printing();
+                if let Err(e) = crate::platform::uninstall_virtual_printer() {
+                    log::error!("Failed to uninstall virtual printer: {}", e);
+                }
+            }
+        }
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     if key == "invite_code" && !value.is_empty() {

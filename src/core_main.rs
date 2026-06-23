@@ -42,6 +42,61 @@ pub fn core_main() -> Option<Vec<String>> {
         }
     }
 
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let raw_args: Vec<String> = std::env::args().collect();
+        if raw_args.len() >= 2 && raw_args[1] == "--cups-print-job" {
+            let code = match crate::platform::linux::cups_print_job(
+                raw_args.get(2).map(|s| s.as_str()),
+            ) {
+                Ok(()) => 0,
+                Err(e) => {
+                    eprintln!("cups print job failed: {}", e);
+                    1
+                }
+            };
+            std::process::exit(code);
+        }
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        let raw_args: Vec<String> = std::env::args().collect();
+        let mut proxy_url = String::new();
+        let mut proxy_username = String::new();
+        let mut proxy_password = String::new();
+        let mut i = 1;
+        while i < raw_args.len() {
+            match raw_args[i].as_str() {
+                "--proxy-url" if i + 1 < raw_args.len() => {
+                    proxy_url = raw_args[i + 1].trim().to_string();
+                    i += 2;
+                }
+                "--proxy-username" if i + 1 < raw_args.len() => {
+                    proxy_username = raw_args[i + 1].clone();
+                    i += 2;
+                }
+                "--proxy-password" if i + 1 < raw_args.len() => {
+                    proxy_password = raw_args[i + 1].clone();
+                    i += 2;
+                }
+                _ => i += 1,
+            }
+        }
+        if !proxy_url.is_empty() {
+            let p = config::Config::shared_path("Proxy.json");
+            if let Some(parent) = p.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let payload = serde_json::json!({
+                "url": proxy_url,
+                "username": proxy_username,
+                "password": proxy_password,
+            });
+            let _ = fs::write(&p, payload.to_string());
+        }
+    }
+
     let mut args: Vec<String> = Vec::new();
     let mut flutter_args: Vec<String> = Vec::new();
 
@@ -201,7 +256,8 @@ pub fn core_main() -> Option<Vec<String>> {
     if args.is_empty()
 		|| args[0] == "--qs"
 		|| crate::common::is_empty_uni_link(&args[0])
-		|| std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().contains("-qs"))).unwrap_or(false) {
+		|| (!args[0].starts_with("--")
+			&& std::env::current_exe().ok().and_then(|p| p.file_name().map(|n| n.to_string_lossy().contains("-qs"))).unwrap_or(false)) {
         std::thread::spawn(move || crate::start_server(false, no_server));
         // Start dashboard WebSocket connection (works in both portable and installed mode)
         if crate::dashboard::is_linked() || !crate::dashboard::get_invite_code().is_empty() {
@@ -255,7 +311,9 @@ pub fn core_main() -> Option<Vec<String>> {
                 return None;						
             } else if args[0] == "--extract" {
                 #[cfg(feature = "with_rc")]
-                hbb_common::allow_err!(crate::rc::extract_resources(&args[1]));
+                if args.len() >= 2 {
+                    hbb_common::allow_err!(crate::rc::extract_resources(&args[1]));
+                }
                 return None;
             } else if args[0] == "--tray" {
                 crate::tray::start_tray();
@@ -269,9 +327,13 @@ pub fn core_main() -> Option<Vec<String>> {
                 return None;
             }
         }
-		if args[0] == "--connect" {
+		if args[0] == "--connect" && args.len() >= 2 {
+			if let Some(scheme_end) = args[1].find("://") {
+				let normalized = format!("hoptodesk://{}", &args[1][scheme_end + 3..]);
+				args[1] = normalized;
+			}
 			let input = &args[1];
-				
+
 			if input != "hoptodesk:///" {
 
 				if input.starts_with("hoptodesk://connect/") {
@@ -301,6 +363,8 @@ pub fn core_main() -> Option<Vec<String>> {
 					if let Some(teamid) = parts.next() {
 						if teamid.len() == 16 || teamid.len() == 32 {
 							fs::write(&Config::path("TeamID.toml"), teamid).expect("Failed to write TeamID to file");
+						} else if !teamid.is_empty() {
+							crate::dashboard::set_pending_quick_connect_token(teamid);
 						}
 					}					
 					if let Some(tokenex) = parts.next() {

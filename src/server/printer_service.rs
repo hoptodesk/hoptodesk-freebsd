@@ -3,13 +3,13 @@
 //
 // Windows: named pipe approach. macOS: CUPS backend + Unix socket.
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 use hbb_common::{
     log,
     message_proto::*,
 };
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 use std::sync::{
     atomic::{AtomicBool, AtomicI32, Ordering},
     mpsc, Mutex,
@@ -17,14 +17,14 @@ use std::sync::{
 
 pub const NAME: &'static str = "remote-printer";
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 lazy_static::lazy_static! {
     static ref PRINT_SERVICE_RUNNING: AtomicBool = AtomicBool::new(false);
     static ref NEXT_JOB_ID: AtomicI32 = AtomicI32::new(1);
     static ref PIPE_STOP_TX: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
 }
 
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 #[derive(Clone)]
 pub struct PrintJob {
     pub id: i32,
@@ -33,7 +33,7 @@ pub struct PrintJob {
 
 /// Start remote printing service
 /// Called when user enables "Enable Remote Printing" option
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub fn start_remote_printing() {
     use crate::platform::{start_print_pipe_server, VIRTUAL_PRINTER_NAME};
 
@@ -69,7 +69,7 @@ pub fn start_remote_printing() {
 
 /// Stop remote printing service
 /// Called when user disables "Enable Remote Printing" option
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub fn stop_remote_printing() {
     if !PRINT_SERVICE_RUNNING.load(Ordering::SeqCst) {
         return;
@@ -98,14 +98,14 @@ pub fn stop_remote_printing() {
 }
 
 /// Check if print service is running
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub fn is_print_service_running() -> bool {
     PRINT_SERVICE_RUNNING.load(Ordering::SeqCst)
 }
 
 /// Create messages to send a print job to the peer
 /// Returns a Vec of messages: first the request, then data blocks, then done
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub fn create_print_job_messages(job: &PrintJob) -> Vec<Message> {
     let mut messages = Vec::new();
 
@@ -159,26 +159,26 @@ pub fn create_print_job_messages(job: &PrintJob) -> Vec<Message> {
 }
 
 // Stub implementations for platforms without printing support (Linux, etc.)
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub fn start_remote_printing() {
     hbb_common::log::warn!("Remote printing is not available on this platform");
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub fn stop_remote_printing() {}
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub fn is_print_service_running() -> bool {
     false
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub struct PrintJob {
     pub id: i32,
     pub data: Vec<u8>,
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+#[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd")))]
 pub fn create_print_job_messages(_job: &PrintJob) -> Vec<hbb_common::message_proto::Message> {
     Vec::new()
 }

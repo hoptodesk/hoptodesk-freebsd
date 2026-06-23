@@ -2,6 +2,7 @@ use lazy_static::lazy_static;
 use log::{info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use tokio::time::{Duration as TokioDuration};
@@ -23,15 +24,13 @@ impl<E: std::error::Error> From<E> for ApiError {
     }
 }
 
-/// Build an HTTP client that routes through the SOCKS5 proxy when configured.
+/// Build an HTTP client that routes through the proxy when configured.
 pub fn make_http_client() -> reqwest::Client {
-    let mut builder = reqwest::Client::builder();
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30));
     if let Some(conf) = Config::get_socks() {
-        let proxy_url = if !conf.username.is_empty() {
-            format!("socks5://{}:{}@{}", conf.username, conf.password, conf.proxy)
-        } else {
-            format!("socks5://{}", conf.proxy)
-        };
+        let proxy_url = crate::proxy::proxy_url(&conf);
         if let Ok(proxy) = reqwest::Proxy::all(&proxy_url) {
             builder = builder.proxy(proxy);
         }
@@ -43,45 +42,62 @@ pub fn make_http_client() -> reqwest::Client {
 struct OnceAPI {
     response: Arc<Mutex<Option<serde_json::Value>>>,
     last_calls: Arc<Mutex<HashMap<String, Instant>>>,
+    refresh_started: AtomicBool,
+    force_refresh: AtomicBool,
+    from_local: AtomicBool,
+    last_forced_refresh: Arc<Mutex<Option<Instant>>>,
 }
 
 impl OnceAPI {
     async fn call(&self) -> Result<serde_json::Value, ApiError> {
-        {
+        let force = self.force_refresh.swap(false, Ordering::SeqCst);
+
+        if self.from_local.load(Ordering::SeqCst) {
             let r = self.response.lock().await;
             if let Some(cached) = &*r {
                 return Ok(cached.clone());
             }
         }
 
-        #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        {
-			let local_api_json = Config::path("api.json");
-            if let Ok(mut file) = fs::File::open(&local_api_json) {
-				let mut body = String::new();
-				file.read_to_string(&mut body).ok();
-				match serde_json::from_str::<serde_json::Value>(&body) {
-					Ok(ret) => {
-						let mut r = self.response.lock().await;
-						*r = Some(ret.clone());
-						info!("Loaded local api.json");
-						return Ok(ret);
-					}
-					Err(_e) => {
-						warn!("Found api.json but invalid format.");
-					}
-				}
+        if !force {
+            let r = self.response.lock().await;
+            if let Some(cached) = &*r {
+                return Ok(cached.clone());
             }
         }
 
-        // Check persistent cache before making a network call.
-        // This avoids redundant API requests from child processes (e.g. --connect)
-        // that don't share the in-memory cache with the main process.
-        if let Ok(cached) = self.load_from_persistent_cache().await {
-            return Ok(cached);
+        let api_uri_trim = API_URI.trim();
+
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        {
+            let local_api_json = Config::path("api.json");
+            if let Ok(mut file) = fs::File::open(&local_api_json) {
+                let mut body = String::new();
+                file.read_to_string(&mut body).ok();
+                match serde_json::from_str::<serde_json::Value>(&body) {
+                    Ok(ret) => {
+                        {
+                            let mut r = self.response.lock().await;
+                            *r = Some(ret.clone());
+                        }
+                        self.from_local.store(true, Ordering::SeqCst);
+                        info!("Loaded local api.json");
+                        return Ok(ret);
+                    }
+                    Err(_e) => {
+                        warn!("Found api.json but invalid format.");
+                    }
+                }
+            }
         }
 
-        let api_uri_trim = API_URI.trim();
+        if !force {
+            if let Ok(cached) = self.load_from_persistent_cache().await {
+                self.start_background_refresh(api_uri_trim);
+                return Ok(cached);
+            }
+        }
+
         let api_uri = Config2::get().options.get("custom-api-url")
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| api_uri_trim.to_owned());
@@ -101,11 +117,63 @@ impl OnceAPI {
 
                 Ok(json_data)
             }
-            Err(e) => {
-                warn!("API call failed: {:?}", e);
+            Err(_e) => {
                 self.load_from_persistent_cache().await
             }
         }
+    }
+
+    async fn force_refresh_on_connect_failure(&self) -> bool {
+        if self.from_local.load(Ordering::SeqCst) {
+            return false;
+        }
+
+        {
+            let mut last = self.last_forced_refresh.lock().await;
+            if let Some(at) = *last {
+                if at.elapsed() < Duration::from_secs(3600) {
+                    return false;
+                }
+            }
+            *last = Some(Instant::now());
+        }
+
+        let api_uri = Config2::get().options.get("custom-api-url")
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| API_URI.trim().to_owned());
+
+        let json_data = match self.fetch_no_ratelimit(&api_uri).await {
+            Ok(json) => json,
+            Err(e) => {
+                warn!("Forced API refresh on connect failure failed: {:?}", e);
+                return false;
+            }
+        };
+
+        {
+            let mut r = self.response.lock().await;
+            *r = Some(json_data.clone());
+        }
+        {
+            let mut last_calls = self.last_calls.lock().await;
+            last_calls.insert(api_uri, Instant::now());
+        }
+
+        let json_clone = json_data.clone();
+        tokio::spawn(async move {
+            let cache_value = base64::encode(serde_json::to_string(&json_clone).unwrap_or_default(), base64::Variant::Original);
+            if !json_clone.is_null() && !cache_value.is_empty() && json_clone.is_object() { Config::set_option("api-cache".to_owned(), cache_value); }
+        });
+
+        true
+    }
+
+    async fn fetch_no_ratelimit(&self, api_uri: &str) -> Result<serde_json::Value, ApiError> {
+        info!("Loading API (forced refresh) {}", api_uri);
+        let response = make_http_client().get(api_uri).send().await?;
+        let body = response.text().await?;
+        let json: serde_json::Value = serde_json::from_str(&body)?;
+        Ok(json)
     }
 
     async fn try_api_call(&self, api_uri: &str) -> Result<serde_json::Value, ApiError> {
@@ -113,8 +181,7 @@ impl OnceAPI {
         let now = Instant::now();
 
         if let Some(&last_call_time) = last_calls.get(api_uri) {
-            if now.duration_since(last_call_time) < Duration::from_secs(60) {
-                //info!("Rate limiting, API call skipped");
+            if now.duration_since(last_call_time) < Duration::from_secs(39600) {
 				return Err(ApiError("Rate limited - API called too recently".to_string()));
             }
         }
@@ -153,37 +220,16 @@ impl OnceAPI {
         Err(ApiError("No valid cache available".to_string()))
     }
 
-    fn start_background_refresh(&self, api_uri_trim: &str) {
-        let response = self.response.clone();
-        let api_uri_trim = api_uri_trim.to_owned();
+    fn start_background_refresh(&self, _api_uri_trim: &str) {
+        if self.refresh_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
 
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(TokioDuration::from_secs(30000)).await;
-                let api_uri = Config2::get().options.get("custom-api-url")
-                    .map(ToOwned::to_owned)
-                    .unwrap_or_else(|| api_uri_trim.to_owned());
-
-                info!("Refreshing API {}", api_uri);
-
-                if let Ok(resp) = make_http_client().get(&api_uri).send().await {
-                    if let Ok(txt) = resp.text().await {
-                        if let Ok(ret) = serde_json::from_str::<serde_json::Value>(&txt) {
-                            {
-                                let mut r = response.lock().await;
-                                *r = Some(ret.clone());
-                            }
-
-                            let ret_clone = ret.clone();
-                            tokio::spawn(async move {
-								let cache_value = base64::encode(serde_json::to_string(&ret_clone).unwrap_or_default(), base64::Variant::Original);
-								if !ret_clone.is_null() && !cache_value.is_empty() && ret_clone.is_object() { Config::set_option("api-cache".to_owned(), cache_value); }
-                            });
-
-                            info!("Background API refresh successful");
-                        }
-                    }
-                }
+                ONCE.erase().await;
+                let _ = ONCE.call().await;
+                tokio::time::sleep(TokioDuration::from_secs(43200)).await;
             }
         });
     }
@@ -193,16 +239,7 @@ impl OnceAPI {
             let mut r = self.response.lock().await;
             *r = None;
         }
-
-        // Also clear the rate limiting cache
-        {
-            let mut last_calls = self.last_calls.lock().await;
-            last_calls.clear();
-        }
-
-        tokio::spawn(async move {
-            Config::set_option("api-cache".to_owned(), "".to_owned());
-        });
+        self.force_refresh.store(true, Ordering::SeqCst);
     }
 }
 
@@ -216,4 +253,8 @@ pub async fn call_api() -> Result<serde_json::Value, ApiError> {
 
 pub async fn erase_api() {
     (*ONCE).erase().await
+}
+
+pub async fn force_refresh_on_connect_failure() -> bool {
+    (*ONCE).force_refresh_on_connect_failure().await
 }

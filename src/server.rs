@@ -51,8 +51,8 @@ mod camera {
 }
 
 pub mod audio_service;
-//#[cfg(not(any(target_os = "android", target_os = "ios")))]
-//pub mod terminal_service;
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub mod terminal_service;
 cfg_if::cfg_if! {
 if #[cfg(not(target_os = "ios"))] {
 mod clipboard_service;
@@ -86,7 +86,7 @@ mod connection;
 pub mod display_service;
 #[cfg(windows)]
 pub mod portable_service;
-#[cfg(any(windows, target_os = "macos"))]
+#[cfg(any(windows, target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub mod printer_service;
 mod service;
 mod video_qos;
@@ -238,11 +238,6 @@ async fn next_message_for_handshake(stream: &mut Stream) -> ResultType<Message> 
     log::debug!("SERVER_TRACE: next_message_for_handshake - Waiting for message with timeout: {:?}", CONNECT_TIMEOUT);
     match timeout(CONNECT_TIMEOUT, stream.next()).await? {
         Some(Ok(bytes)) => {
-            log::debug!(
-                "SERVER_TRACE: next_message_for_handshake - Received {} bytes: {}",
-                bytes.len(),
-                bytes.iter().map(|b| format!("{:02x}", b)).collect::<String>()
-            );
             if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
                 log::debug!("SERVER_TRACE: next_message_for_handshake - Successfully parsed message.");
                 return Ok(msg_in);
@@ -785,7 +780,9 @@ async fn sync_and_watch_config_dir() {
                 }
             }
             Err(_) => {
-                log::info!("#{} try: failed to connect to ipc_service", i);
+                if i == 1 {
+                    log::debug!("failed to connect to ipc_service, will retry up to {} times silently", tries);
+                }
             }
         }
     }
@@ -811,7 +808,7 @@ pub async fn stop_main_window_process() {
 
 /// Send printer data to active connections via IPC
 /// Called by printer_service when a print job is captured
-#[cfg(any(target_os = "windows", target_os = "macos"))]
+#[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
 pub fn on_printer_data(data: Vec<u8>) {
     log::info!("on_printer_data: {} bytes", data.len());
 

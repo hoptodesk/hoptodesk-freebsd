@@ -11,8 +11,8 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use hbb_common::proxy;
 use tokio_rustls::rustls::{self, ClientConfig as TlsClientConfig, OwnedTrustAnchor};
+use hbb_common::proxy;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use turn::client::{tcp::TcpTurn, ClientConfig, TlsConfig};
 use webrtc_util::conn::Conn;
@@ -142,109 +142,152 @@ pub async fn connect_over_turn_servers(
     peer_addr: SocketAddr,
     sender: Arc<tokio::sync::Mutex<crate::client::WsSender>>,
 ) -> ResultType<(Arc<impl Conn>, FramedStream)> {
-    let turn_servers = match get_turn_servers().await {
-        Some(servers) => servers,
-        None => bail!("empty turn servers!"),
-    };
-    let srv_len = turn_servers.len();
-    let (tx, mut rx) = mpsc::channel(srv_len);
-    let mut handles = Vec::new();
-	
-    for config in turn_servers {
-        let sender = sender.clone();
-        let peer_id = peer_id.to_owned();
-        let tx = tx.clone();
-        let handle = tokio::spawn(async move {
-            let turn_server = config.addr.clone();
-            let truncated_ip = turn_server.split('.').take(3).collect::<Vec<&str>>().join(".");
-            log::info!("[turn] start establishing over TURN server: {}", truncated_ip);
-            
-            let conn = match timeout(
-                tokio::time::Duration::from_secs(7),
-                create_relay_connection(config, &peer_id, peer_addr, sender.clone()),
-            )
-            .await
-            {
-                Ok(Some(conn)) => {
-                    log::info!("[turn] established over TURN server: {}", truncated_ip);
-                    Some(conn)
-                }
-                Ok(None) => {
-                    log::warn!("[turn] didn't establish over TURN server: {}", truncated_ip);
-                    None
-                }
-                Err(_) => {
-                    log::warn!("[turn] timeout establishing over TURN server: {}", truncated_ip);
-                    None
-                }
-            };
-            
-            if tx.send(conn).await.is_err() {
-                log::warn!("failed to send result to channel: {}", truncated_ip);
+    let mut forced_refresh_done = false;
+    loop {
+        let all_servers = match get_turn_servers().await {
+            Some(servers) => servers,
+            None => bail!("empty turn servers!"),
+        };
+        let total_servers = all_servers.len();
+        if total_servers == 0 {
+            bail!("empty turn servers!");
+        }
+
+        let max_attempts = total_servers.min(5);
+        let alloc_timeout = tokio::time::Duration::from_secs(5);
+        let phase2_timeout = tokio::time::Duration::from_secs(5);
+        let mut excluded: Vec<String> = Vec::new();
+        let mut last_err: Option<String> = None;
+
+        for attempt in 0..max_attempts {
+            let candidates: Vec<TurnConfig> = all_servers
+                .iter()
+                .filter(|c| !excluded.contains(&c.addr))
+                .cloned()
+                .collect();
+            if candidates.is_empty() {
+                break;
             }
-        });
-        handles.push(handle);
-    }
-    
-    drop(tx); // drop tx to end the channel
-    
-    // Wait for ANY successful connection, not the first completion
-    let mut completed_tasks = 0;
-    let mut all_results = Vec::new();
-    
-    while let Some(ret) = rx.recv().await {
-        completed_tasks += 1;
-        
-        // If we got a successful connection, use it immediately
-        if let Some(success) = ret {
-            // Cancel all remaining tasks
+            if attempt > 0 {
+                log::info!(
+                    "[turn] retry attempt {} ({} candidate(s) remaining, {} excluded)",
+                    attempt + 1,
+                    candidates.len(),
+                    excluded.len()
+                );
+            }
+
+            let candidate_count = candidates.len();
+            let (tx, mut rx) = mpsc::channel(candidate_count);
+            let mut handles = Vec::new();
+
+            for config in candidates {
+                let tx = tx.clone();
+                let handle = tokio::spawn(async move {
+                    let server_addr = config.addr.clone();
+                    let truncated_ip = server_addr
+                        .split('.')
+                        .take(3)
+                        .collect::<Vec<&str>>()
+                        .join(".");
+                    log::info!("[turn] start establishing over TURN server: {}", truncated_ip);
+                    let result = timeout(alloc_timeout, async {
+                        let tc = match TurnClient::new(config).await {
+                            Ok(tc) => tc,
+                            Err(e) => {
+                                log::warn!("[turn] init failed for {}: {}", truncated_ip, e);
+                                return None;
+                            }
+                        };
+                        match tc.create_relay_connection(peer_addr).await {
+                            Ok((conn, relay_addr)) => {
+                                Some((tc, conn, relay_addr, truncated_ip.clone(), server_addr.clone()))
+                            }
+                            Err(e) => {
+                                log::warn!("[turn] allocate failed for {}: {}", truncated_ip, e);
+                                None
+                            }
+                        }
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let _ = tx.send(result).await;
+                });
+                handles.push(handle);
+            }
+            drop(tx);
+
+            let mut chosen = None;
+            while let Some(maybe_alloc) = rx.recv().await {
+                if let Some(alloc) = maybe_alloc {
+                    chosen = Some(alloc);
+                    break;
+                }
+            }
             for handle in handles {
                 handle.abort();
             }
-            log::info!("[turn] successfully established connection over a TURN server");
-            return Ok(success);
-        }
-        
-        all_results.push(ret);
-        
-        // Only give up after ALL tasks have completed AND all failed
-        if completed_tasks >= srv_len {
-            break;
-        }
-    }
-    
-    // Wait for any remaining tasks to complete (cleanup)
-    for handle in handles {
-        let _ = handle.await;
-    }
-    
-    bail!("Failed to connect via relay server: all {} candidates failed!", srv_len)
-}
 
+            let (turn_client, conn, relay_addr, truncated_ip, server_addr) = match chosen {
+                Some(c) => c,
+                None => {
+                    last_err = Some(format!(
+                        "all {} candidate(s) failed to allocate",
+                        candidate_count
+                    ));
+                    break;
+                }
+            };
 
-async fn create_relay_connection(
-    config: TurnConfig,
-    peer_id: &str,
-    peer_addr: SocketAddr,
-    sender: Arc<tokio::sync::Mutex<crate::client::WsSender>>,
-) -> Option<(Arc<impl Conn>, FramedStream)> {
-    if let Ok(turn_client) = TurnClient::new(config).await {
-
-		match turn_client.create_relay_connection(peer_addr).await {
-            Ok(relay) => {
-                let conn = relay.0;
-                let relay_addr = relay.1;
-				if let Ok(stream) =
-                    establish_over_relay(&peer_id, turn_client, relay_addr, sender).await
-                {
-                    return Some((conn, stream));
+            match timeout(
+                phase2_timeout,
+                establish_over_relay(peer_id, turn_client, relay_addr, sender.clone()),
+            )
+            .await
+            {
+                Ok(Ok(stream)) => {
+                    log::info!("[turn] established over TURN server: {}", truncated_ip);
+                    log::info!("[turn] successfully established connection over a TURN server");
+                    return Ok((conn, stream));
+                }
+                Ok(Err(e)) => {
+                    log::warn!("[turn] relay handshake failed for {}: {}", truncated_ip, e);
+                    last_err = Some(format!("{}: {}", truncated_ip, e));
+                    excluded.push(server_addr);
+                }
+                Err(_) => {
+                    log::warn!(
+                        "[turn] timeout waiting for peer over TURN server: {} (will retry without it)",
+                        truncated_ip
+                    );
+                    last_err = Some(format!(
+                        "{}: peer did not connect within {}s",
+                        truncated_ip,
+                        phase2_timeout.as_secs()
+                    ));
+                    excluded.push(server_addr);
                 }
             }
-            Err(err) => log::warn!("create relay conn failed: {}", err),
         }
+
+        if !forced_refresh_done && hbb_common::api::force_refresh_on_connect_failure().await {
+            forced_refresh_done = true;
+            {
+                *TURN_SERVERS_CACHE.lock().unwrap() = None;
+            }
+            log::info!("[turn] all candidates failed; refreshed TURN list, retrying once");
+            continue;
+        }
+
+        bail!(
+            "Failed to connect via relay server: all {} candidates exhausted (last error: {})",
+            excluded.len().max(1),
+            last_err.unwrap_or_else(|| "no allocation succeeded".to_string())
+        );
     }
-    return None;
 }
+
 
 async fn establish_over_relay(
     peer_id: &str,

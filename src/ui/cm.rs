@@ -61,6 +61,16 @@ impl InvokeUiCM for SciterHandler {
         log::info!("[CM-wry] update_voice_call_state: id={}", client.id);
     }
 
+    fn update_link_dashboard_state(&self, client: &crate::ui_cm_interface::Client) {
+        log::info!("[CM-wry] update_link_dashboard_state: id={}, incoming={}", client.id, client.incoming_link_dashboard);
+        let name = client.link_dashboard_account_name.replace('\\', "\\\\").replace('"', "\\\"");
+        let existing = client.link_dashboard_existing_account_name.replace('\\', "\\\\").replace('"', "\\\"");
+        send_to_cm_webview("update_link_dashboard", &format!(
+            "{{\"id\":{},\"incoming\":{},\"account_name\":\"{}\",\"existing_account_name\":\"{}\"}}",
+            client.id, client.incoming_link_dashboard, name, existing
+        ));
+    }
+
     fn file_transfer_log(&self, action: &str, log_msg: &str) {
         log::info!("[CM-wry] file_transfer_log: action={}, log={}", action, log_msg);
         let a = action.replace('"', "\\\"");

@@ -64,6 +64,9 @@ pub struct Client {
     pub is_invite: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    pub incoming_link_dashboard: bool,
+    pub link_dashboard_account_name: String,
+    pub link_dashboard_existing_account_name: String,
     pub password_to_connect_to_inviter: String,
     #[serde(skip)]
     pub tx: UnboundedSender<Data>,
@@ -109,6 +112,7 @@ pub trait InvokeUiCM: Send + Clone + 'static + Sized {
     fn change_language(&self);
     fn show_elevation(&self, show: bool);    
     fn update_voice_call_state(&self, client: &Client);
+    fn update_link_dashboard_state(&self, client: &Client);
     fn file_transfer_log(&self, action: &str, log: &str);
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
 	fn accept_invite(&self, id: i32);
@@ -206,6 +210,24 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             self.ui_handler.update_voice_call_state(client);
         }
     }
+
+    fn link_dashboard_incoming(&self, id: i32, account_name: String, existing_account_name: String) {
+        if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
+            client.incoming_link_dashboard = true;
+            client.link_dashboard_account_name = account_name;
+            client.link_dashboard_existing_account_name = existing_account_name;
+            self.ui_handler.update_link_dashboard_state(client);
+        }
+    }
+
+    fn link_dashboard_clear(&self, id: i32) {
+        if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
+            client.incoming_link_dashboard = false;
+            client.link_dashboard_account_name = String::new();
+            client.link_dashboard_existing_account_name = String::new();
+            self.ui_handler.update_link_dashboard_state(client);
+        }
+    }
 }
 
 #[inline]
@@ -272,54 +294,6 @@ fn close_incoming(id: &str) {
     });
 }
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-async fn tell_sessions(body: String, myid: String, client_ids: String) {
-	let url = format!(
-        "https://api.hoptodesk.com/?teamid={}&id={}&clientidslist={}", body, myid, client_ids
-    );
-	let response = crate::common::make_http_client().get(&url).send()
-        .await
-        .expect("Error making HTTP GET request");
-    let _response_text = response.text().await.expect("Error reading API response.");
-
-    //log::info!("Reported Sessions Response for {}, Sessions: {}, Response: {}", myid, client_ids, response_text);
-}
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-fn list_sessions(_id: &str) {
-    let clients = CLIENTS.read().unwrap();
-    let mut client_ids = String::new();
-
-    for (_, client) in clients.iter() {
-        if !client_ids.is_empty() {
-            client_ids.push(',');
-        }
-        client_ids.push_str(&client.peer_id);
-    }
-
-    if !clients.is_empty() {
-        let mut client_ids = String::new();
-
-        for (_, client) in clients.iter() {
-            if !client_ids.is_empty() {
-                client_ids.push(',');
-            }
-            client_ids.push_str(&client.peer_id);
-        }
-
-        let myid = Config::get_id();
-        let body = std::fs::read_to_string(Config::path("TeamID.toml"))
-            .unwrap_or_else(|err| {
-                eprintln!("Error reading file: {}", err);
-                String::new()
-            });
-		if !client_ids.is_empty() {
-		tokio::spawn(async move {
-			tell_sessions(body, myid, client_ids).await;
-		});			
-		}
-    }
-}
 
 
 
@@ -440,6 +414,8 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                         keyboard, clipboard, audio, file, restart, recording, block_input,
                                         camera: is_view_camera,
                                         from_switch, is_invite, in_voice_call: false, incoming_voice_call: false,
+                                        incoming_link_dashboard: false, link_dashboard_account_name: String::new(),
+                                        link_dashboard_existing_account_name: String::new(),
                                         password_to_connect_to_inviter: password_to_connect_to_inviter.clone(),
                                         tx: self.tx.clone(),
                                     };
@@ -482,9 +458,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                     close_incoming(&id);
                                 }
                                 #[cfg(not(any(target_os = "android", target_os = "ios")))]
-								Data::ListSessions { id } => {
-									list_sessions(&id);
-                                }								
+								Data::ListSessions { .. } => {}
                                 Data::Disconnected => {
                                     self.close = false;
                                     log::info!("cm ipc connection disconnect");
@@ -565,6 +539,12 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                 Data::CloseVoiceCall(reason) => {
                                     self.cm.voice_call_closed(self.conn_id, reason.as_str());
                                 }
+                                Data::LinkDashboardIncoming { account_name, existing_account_name } => {
+                                    self.cm.link_dashboard_incoming(self.conn_id, account_name, existing_account_name);
+                                }
+                                Data::LinkDashboardTimeout => {
+                                    self.cm.link_dashboard_clear(self.conn_id);
+                                }
                                 
                                 #[cfg(target_os = "windows")]
                                 Data::ClipboardNonFile(_) => {
@@ -605,7 +585,7 @@ impl<T: InvokeUiCM> IpcTaskRunner<T> {
                                         }
                                     }
                                 }
-                                #[cfg(any(target_os = "windows", target_os = "macos"))]
+                                #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
                                 Data::PrinterData(data) => {
                                     // Forward printer data to all authorized connections
                                     log::info!("[cm] Received PrinterData: {} bytes, forwarding to connections", data.len());
@@ -817,6 +797,9 @@ pub async fn start_listen<T: InvokeUiCM>(
                     is_invite,
                     in_voice_call: false,
                     incoming_voice_call: false,
+                    incoming_link_dashboard: false,
+                    link_dashboard_account_name: String::new(),
+                    link_dashboard_existing_account_name: String::new(),
                     password_to_connect_to_inviter: password_to_connect_to_inviter.clone(),
                     tx: tx.clone(),
                 };
@@ -840,6 +823,12 @@ pub async fn start_listen<T: InvokeUiCM>(
             }
             Some(Data::CloseVoiceCall(reason)) => {
                 cm.voice_call_closed(current_id, reason.as_str());
+            }
+            Some(Data::LinkDashboardIncoming { account_name, existing_account_name }) => {
+                cm.link_dashboard_incoming(current_id, account_name, existing_account_name);
+            }
+            Some(Data::LinkDashboardTimeout) => {
+                cm.link_dashboard_clear(current_id);
             }
             None => {
                 break;
@@ -1206,6 +1195,19 @@ pub fn close_voice_call(id: i32) {
         #[cfg(not(any(target_os = "ios")))]
         allow_err!(client.tx.send(Data::CloseVoiceCall("".to_owned())));
     };
+}
+
+#[inline]
+pub fn handle_link_dashboard_response(id: i32, accept: bool) {
+    let tx = CLIENTS.read().unwrap().get(&id).map(|c| c.tx.clone());
+    if let Some(tx) = tx {
+        #[cfg(not(any(target_os = "ios")))]
+        allow_err!(tx.send(Data::LinkDashboardResponse(accept)));
+    }
+    if let Some(client) = CLIENTS.write().unwrap().get_mut(&id) {
+        client.incoming_link_dashboard = false;
+        client.link_dashboard_account_name = String::new();
+    }
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]

@@ -32,6 +32,9 @@ pub mod win_inline_privacy;
 #[cfg(target_os = "macos")]
 pub mod macos;
 
+#[cfg(any(target_os = "linux", target_os = "freebsd"))]
+pub mod linux;
+
 #[cfg(windows)]
 mod win_virtual_display;
 #[cfg(windows)]
@@ -120,7 +123,15 @@ lazy_static::lazy_static! {
             {
                 macos::PRIVACY_MODE_IMPL.to_owned()
             }
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+            {
+                if linux::is_supported() {
+                    linux::PRIVACY_MODE_IMPL.to_owned()
+                } else {
+                    "".to_owned()
+                }
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "freebsd")))]
             {
                 "".to_owned()
             }
@@ -151,6 +162,14 @@ lazy_static::lazy_static! {
             map.insert(macos::PRIVACY_MODE_IMPL, |impl_key: &str| {
                 Box::new(macos::PrivacyModeImpl::new(impl_key))
             });
+        }
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            if linux::is_supported() {
+                map.insert(linux::PRIVACY_MODE_IMPL, |impl_key: &str| {
+                    Box::new(linux::PrivacyModeImpl::new(impl_key))
+                });
+            }
         }
         #[cfg(windows)]
         let mut map: HashMap<&'static str, PrivacyModeCreator> = HashMap::new();
@@ -377,7 +396,20 @@ pub fn get_supported_privacy_mode_impl() -> Vec<(&'static str, &'static str)> {
         // doesn't provide multiple modes like Windows does.
         vec![(macos::PRIVACY_MODE_IMPL, "privacy_mode_impl_macos_tip")]
     }
-    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        if linux::is_supported() {
+            vec![(linux::PRIVACY_MODE_IMPL, "privacy_mode_impl_linux_tip")]
+        } else {
+            Vec::new()
+        }
+    }
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "freebsd"
+    )))]
     {
         Vec::new()
     }

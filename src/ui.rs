@@ -31,6 +31,7 @@ pub mod cm;
 #[cfg(feature = "inline")]
 pub mod inline;
 pub mod remote;
+pub mod terminal_emulator;
 
 pub type Children = Arc<Mutex<(bool, HashMap<(String, String), Child>)>>;
 #[allow(dead_code)]
@@ -65,7 +66,7 @@ pub fn start(args: &mut [String]) {
     if args.is_empty()
         || args_string.is_empty()
         || args[0] == "--qs"
-        || (args[0] != "--install" && std::env::current_exe().ok()
+        || (!args[0].starts_with("--") && std::env::current_exe().ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().contains("-qs")))
             .unwrap_or(false)) {
         std::thread::spawn(move || check_zombie());
@@ -107,7 +108,8 @@ pub fn start(args: &mut [String]) {
         || args[0] == "--file-transfer"
         || args[0] == "--port-forward"
         || args[0] == "--rdp"
-        || args[0] == "--view-camera")
+        || args[0] == "--view-camera"
+        || args[0] == "--terminal")
         && args.len() > 1
     {
         log::info!("[UI::start] args: {:?}", args);
@@ -193,6 +195,8 @@ pub fn start(args: &mut [String]) {
             page = "file-transfer.html";
         } else if cmd == "--port-forward" || cmd == "--rdp" {
             page = "port-forward.html";
+        } else if cmd == "--terminal" {
+            page = "terminal.html";
         } else {
             page = "remote.html";
         }
@@ -257,8 +261,9 @@ fn start_wry_ui(page: &str, title: &str) {
     let is_remote = page == "remote.html";
     let is_file_transfer = page == "file-transfer.html";
     let is_port_forward = page == "port-forward.html";
+    let is_terminal = page == "terminal.html";
     let is_cm = page == "cm.html";
-    let window_size = if is_remote || is_file_transfer {
+    let window_size = if is_remote || is_file_transfer || is_terminal {
         tao::dpi::LogicalSize::new(1024.0, 768.0)
     } else if is_port_forward {
         tao::dpi::LogicalSize::new(500.0, 400.0)
@@ -268,10 +273,11 @@ fn start_wry_ui(page: &str, title: &str) {
         tao::dpi::LogicalSize::new(800.0, 600.0)
     };
 
-    let window_title = if is_remote || is_file_transfer || is_port_forward {
+    let window_title = if is_remote || is_file_transfer || is_port_forward || is_terminal {
         if let Some(ref params) = *REMOTE_PARAMS.lock().unwrap() {
             let prefix = if is_file_transfer { "File Transfer" }
                 else if is_port_forward { "Port Forward" }
+                else if is_terminal { "Terminal" }
                 else { &params.id };
             format!("{} - {}", prefix, title)
         } else {
@@ -318,7 +324,7 @@ fn start_wry_ui(page: &str, title: &str) {
         log::info!("[CM] Connection Manager initialized");
     }
 
-    if is_remote || is_file_transfer || is_port_forward {
+    if is_remote || is_file_transfer || is_port_forward || is_terminal {
         if is_remote {
             remote::start_frame_server();
             let tx_port = WEBVIEW_SENDER.lock().unwrap().clone();
@@ -409,6 +415,8 @@ fn start_remote_session() {
 
     let conn_type = if params.cmd == "--file-transfer" {
         ConnType::FILE_TRANSFER
+    } else if params.cmd == "--terminal" {
+        ConnType::TERMINAL
     } else if params.cmd == "--view-camera" {
         ConnType::VIEW_CAMERA
     } else if params.cmd == "--port-forward" {
@@ -452,6 +460,9 @@ fn get_page_html(page: &str) -> String {
     }
     if page == "port-forward.html" {
         return get_port_forward_page_html();
+    }
+    if page == "terminal.html" {
+        return get_terminal_page_html();
     }
     if page == "ticket.html" {
         return get_ticket_page_html();
@@ -578,6 +589,17 @@ fn get_page_html(page: &str) -> String {
         .search-input:focus {{ outline: none; border-color: #2C8CFF; }}
         .sessions-grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
                          gap: 10px; }}
+        .ab-toolbar {{ display: flex; align-items: center; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }}
+        .btn-ab-add {{ padding: 6px 14px; border: 1px solid #2C8CFF; border-radius: 6px; background: #2C8CFF;
+                      color: #fff; cursor: pointer; font-size: 13px; }}
+        .btn-ab-add:hover {{ opacity: 0.9; }}
+        .ab-tags {{ display: flex; gap: 6px; flex-wrap: wrap; }}
+        .ab-tag {{ padding: 3px 10px; border-radius: 12px; font-size: 12px; cursor: pointer;
+                  background: var(--card-bg); border: 1px solid var(--border); color: var(--text); }}
+        .ab-tag.active {{ background: #2C8CFF; border-color: #2C8CFF; color: #fff; }}
+        .session-card .card-tags {{ display: flex; gap: 4px; flex-wrap: wrap; justify-content: center; margin-top: 6px; }}
+        .session-card .card-tag {{ font-size: 10px; padding: 1px 6px; border-radius: 8px;
+                                  background: var(--border); color: var(--text); }}
         .session-card {{ background: var(--card-bg); border-radius: 10px; padding: 12px; cursor: pointer;
                         position: relative; text-align: center;
                         box-shadow: 0 1px 2px rgba(0,0,0,0.05); }}
@@ -726,7 +748,12 @@ fn get_page_html(page: &str) -> String {
                 <span class="tab active" data-tab="recent" onclick="switchTab('recent')" data-t="Recent Sessions">Recent Sessions</span>
                 <span class="tab" data-tab="favorites" onclick="switchTab('favorites')" data-t="Favorites">Favorites</span>
                 <span class="tab" data-tab="discovered" onclick="switchTab('discovered')" data-t="Discovered">Discovered</span>
+                <span class="tab" data-tab="addressbook" onclick="switchTab('addressbook')" data-t="Address Book">Address Book</span>
                 <input class="search-input" type="text" placeholder="Search ID" oninput="filterSessions(this.value)">
+            </div>
+            <div class="ab-toolbar" id="ab-toolbar" style="display:none">
+                <button class="btn-ab-add" onclick="openAddId()" data-t="Add ID">Add ID</button>
+                <div class="ab-tags" id="ab-tags"></div>
             </div>
             <div class="sessions-grid" id="sessions-grid"></div>
         </div>
@@ -756,6 +783,10 @@ fn get_page_html(page: &str) -> String {
             <div class="settings-item">
                 <label data-t="TCP Tunneling">TCP Tunneling</label>
                 <label class="toggle"><input type="checkbox" id="opt-enable-tunnel" onchange="setOpt('enable-tunnel',this.checked)"><span class="toggle-slider"></span></label>
+            </div>
+            <div class="settings-item">
+                <label data-t="Remote Terminal">Remote Terminal</label>
+                <label class="toggle"><input type="checkbox" id="opt-enable-terminal" onchange="setOpt('enable-terminal',this.checked)"><span class="toggle-slider"></span></label>
             </div>
             <div class="settings-item">
                 <label data-t="Wake On LAN">Wake On LAN</label>
@@ -892,7 +923,7 @@ fn get_page_html(page: &str) -> String {
                 <div style="text-align:center;margin-bottom:8px">
                     <input type="text" id="tfa-code-input" maxlength="6" placeholder="000000" style="width:150px;padding:10px;text-align:center;font-size:20px;font-family:monospace;letter-spacing:4px;border:2px solid var(--input-border);border-radius:8px;background:var(--input-bg);color:var(--text-dark)" />
                 </div>
-                <div id="tfa-error" style="display:none;text-align:center;color:#EF4444;font-size:12px;margin-bottom:8px">Invalid code. Please try again.</div>
+                <div id="tfa-error" style="display:none;text-align:center;color:#EF4444;font-size:12px;margin-bottom:8px" data-t="Invalid code. Please try again.">Invalid code. Please try again.</div>
             </div>
             <div class="modal-buttons">
                 <button class="modal-btn secondary" onclick="closeModal('tfa-modal')" data-t="Cancel">Cancel</button>
@@ -1003,28 +1034,63 @@ fn get_page_html(page: &str) -> String {
         </div>
     </div>
 
+    <div class="modal-overlay" id="ab-id-modal">
+        <div class="modal" style="min-width:360px;max-width:420px">
+            <h2 style="text-align:center;margin-bottom:12px" data-t="Add to Address Book">Add to Address Book</h2>
+            <input type="text" id="ab-id-input" data-t-placeholder="Device ID" placeholder="Device ID"
+                   style="width:100%;padding:10px 12px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;outline:none;margin-bottom:8px">
+            <input type="text" id="ab-id-alias" data-t-placeholder="Alias (optional)" placeholder="Alias (optional)"
+                   style="width:100%;padding:10px 12px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;outline:none;margin-bottom:8px">
+            <input type="text" id="ab-id-tags" data-t-placeholder="Tags, comma separated (optional)" placeholder="Tags, comma separated (optional)"
+                   style="width:100%;padding:10px 12px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;outline:none">
+            <div class="modal-buttons">
+                <button class="modal-btn secondary" onclick="closeModal('ab-id-modal')" data-t="Cancel">Cancel</button>
+                <button class="modal-btn primary" onclick="saveAddId()" data-t="OK">OK</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-overlay" id="ab-edit-modal">
+        <div class="modal" style="min-width:360px;max-width:420px">
+            <h2 style="text-align:center;margin-bottom:12px" data-t="Edit">Edit</h2>
+            <input type="text" id="ab-edit-alias" data-t-placeholder="Alias (optional)" placeholder="Alias (optional)"
+                   style="width:100%;padding:10px 12px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;outline:none;margin-bottom:8px">
+            <input type="text" id="ab-edit-tags" data-t-placeholder="Tags, comma separated (optional)" placeholder="Tags, comma separated (optional)"
+                   style="width:100%;padding:10px 12px;border:1px solid #E2E8F0;border-radius:8px;font-size:14px;outline:none">
+            <div class="modal-buttons">
+                <button class="modal-btn secondary" onclick="closeModal('ab-edit-modal')" data-t="Cancel">Cancel</button>
+                <button class="modal-btn primary" onclick="saveAbEdit()" data-t="OK">OK</button>
+            </div>
+        </div>
+    </div>
+
     <div class="ctx-menu" id="ctx-menu">
         <div class="ctx-item" onclick="ctxAction('connect')" data-t="Connect">Connect</div>
         <div class="ctx-item" onclick="ctxAction('transfer')" data-t="Transfer File">Transfer File</div>
         <div class="ctx-item" onclick="ctxAction('tunnel')" data-t="TCP Tunneling">TCP Tunneling</div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item" onclick="ctxAction('rename')" data-t="Rename">Rename</div>
+        <div class="ctx-item ctx-session-only" onclick="ctxAction('rename')" data-t="Rename">Rename</div>
         <div class="ctx-item" onclick="ctxAction('copy-id')" data-t="Copy ID">Copy ID</div>
-        <div class="ctx-item" id="ctx-fav-item" onclick="ctxAction('toggle-fav')" data-t="Add to Favorites">Add to Favorites</div>
+        <div class="ctx-item ctx-session-only" id="ctx-fav-item" onclick="ctxAction('toggle-fav')" data-t="Add to Favorites">Add to Favorites</div>
+        <div class="ctx-item ctx-session-only" onclick="ctxAction('ab-add')" data-t="Add to Address Book">Add to Address Book</div>
+        <div class="ctx-item ctx-ab-only" onclick="ctxAction('ab-edit')" data-t="Edit">Edit</div>
         <div class="ctx-sep"></div>
-        <div class="ctx-item" onclick="ctxAction('wol')" data-t="Wake On LAN">Wake On LAN</div>
-        <div class="ctx-item" onclick="ctxAction('forget-pw')" data-t="Forget Password">Forget Password</div>
-        <div class="ctx-item" style="color:#EF4444" onclick="ctxAction('remove')" data-t="Remove">Remove</div>
+        <div class="ctx-item ctx-session-only" onclick="ctxAction('wol')" data-t="Wake On LAN">Wake On LAN</div>
+        <div class="ctx-item ctx-session-only" onclick="ctxAction('forget-pw')" data-t="Forget Password">Forget Password</div>
+        <div class="ctx-item ctx-session-only" style="color:#EF4444" onclick="ctxAction('remove')" data-t="Remove">Remove</div>
+        <div class="ctx-item ctx-ab-only" style="color:#EF4444" onclick="ctxAction('ab-remove')" data-t="Remove from Address Book">Remove from Address Book</div>
     </div>
 
     <script>
         var currentTab = 'recent';
-        var sessionsData = {{ recent: [], favorites: [], discovered: [] }};
+        var sessionsData = {{ recent: [], favorites: [], discovered: [], addressbook: [] }};
         var favSet = new Set();
         var searchQuery = '';
         var ctxPeerId = '';
         var pendingOptionKey = '';
         var optionsCache = {{}};
+        var abEntry = {{ peers: [], tags: [], tag_colors: '' }};
+        var abSelectedTags = [];
 
         function callRust(method, args) {{
             window.ipc.postMessage(JSON.stringify({{ method: method, args: args || [] }}));
@@ -1051,7 +1117,14 @@ fn get_page_html(page: &str) -> String {
 
         function renderSessions() {{
             var grid = document.getElementById('sessions-grid');
-            var data = sessionsData[currentTab] || [];
+            var isAb = currentTab === 'addressbook';
+            var data = isAb ? abEntry.peers.slice() : (sessionsData[currentTab] || []);
+            if (isAb && abSelectedTags.length > 0) {{
+                data = data.filter(function(p) {{
+                    var tags = p.tags || [];
+                    return abSelectedTags.some(function(t) {{ return tags.indexOf(t) >= 0; }});
+                }});
+            }}
             if (searchQuery) {{
                 var q = searchQuery.toLowerCase();
                 data = data.filter(function(p) {{
@@ -1063,7 +1136,8 @@ fn get_page_html(page: &str) -> String {
             }}
             if (!data || data.length === 0) {{
                 var msg = currentTab === 'recent' ? t('Recent sessions will show here.') :
-                          currentTab === 'favorites' ? t('No favorites yet.') : t('No devices discovered.');
+                          currentTab === 'favorites' ? t('No favorites yet.') :
+                          isAb ? t('Your address book is empty.') : t('No devices discovered.');
                 grid.innerHTML = '<div class="sessions-empty"><span style="color:#B0BEC5;font-size:13px;">' + msg + '</span></div>';
                 return;
             }}
@@ -1073,6 +1147,14 @@ fn get_page_html(page: &str) -> String {
                 if (name.length > 20) name = name.substring(0, 18) + '..';
                 var isFav = favSet.has(p.id);
                 var eid = (p.id||'').replace(/'/g,"\\'");
+                var tagsHtml = '';
+                if (isAb && p.tags && p.tags.length) {{
+                    tagsHtml = '<div class="card-tags">' + p.tags.map(function(tg) {{
+                        return '<span class="card-tag">' + htmlEscape(tg) + '</span>';
+                    }}).join('') + '</div>';
+                }}
+                var favHtml = isAb ? '' :
+                    '<span class="fav-icon ' + (isFav ? 'active' : '') + '" onclick="event.stopPropagation();toggleFav(\'' + eid + '\')">&#9829;</span>';
                 html += '<div class="session-card" ondblclick="quickConnect(\'' + eid + '\')" ' +
                     'onclick="selectPeer(\'' + eid + '\')" ' +
                     'oncontextmenu="event.preventDefault();showCtxMenu(event,\'' + eid + '\')">' +
@@ -1080,11 +1162,33 @@ fn get_page_html(page: &str) -> String {
                     '<div class="peer-name" title="' + (p.alias || p.username || p.hostname || '').replace(/"/g,'&quot;') + '">' +
                         (name || '&nbsp;') + '</div>' +
                     '<div class="peer-id">' + formatId(p.id) + '</div>' +
-                    '<span class="fav-icon ' + (isFav ? 'active' : '') + '" onclick="event.stopPropagation();toggleFav(\'' + eid + '\')">&#9829;</span>' +
+                    tagsHtml +
+                    favHtml +
                     '<span class="menu-icon" onclick="event.stopPropagation();showCtxMenu(event,\'' + eid + '\')">&#8942;</span>' +
                     '</div>';
             }});
             grid.innerHTML = html;
+        }}
+
+        function htmlEscape(s) {{
+            var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML;
+        }}
+
+        function renderAbTags() {{
+            var el = document.getElementById('ab-tags');
+            if (!el) return;
+            el.innerHTML = (abEntry.tags || []).map(function(tg) {{
+                var active = abSelectedTags.indexOf(tg) >= 0 ? ' active' : '';
+                var etg = tg.replace(/'/g,"\\'");
+                return '<span class="ab-tag' + active + '" onclick="toggleAbTag(\'' + etg + '\')">' + htmlEscape(tg) + '</span>';
+            }}).join('');
+        }}
+
+        function toggleAbTag(tg) {{
+            var i = abSelectedTags.indexOf(tg);
+            if (i >= 0) abSelectedTags.splice(i, 1); else abSelectedTags.push(tg);
+            renderAbTags();
+            renderSessions();
         }}
 
         function switchTab(tab) {{
@@ -1092,7 +1196,9 @@ fn get_page_html(page: &str) -> String {
             document.querySelectorAll('.tab').forEach(function(t) {{
                 t.classList.toggle('active', t.getAttribute('data-tab') === tab);
             }});
+            document.getElementById('ab-toolbar').style.display = (tab === 'addressbook') ? 'flex' : 'none';
             if (tab === 'discovered') callRust('discover');
+            if (tab === 'addressbook') callRust('get_ab');
             renderSessions();
         }}
 
@@ -1153,10 +1259,13 @@ fn get_page_html(page: &str) -> String {
         function showCtxMenu(e, id) {{
             ctxPeerId = id;
             var menu = document.getElementById('ctx-menu');
+            var isAb = currentTab === 'addressbook';
+            menu.querySelectorAll('.ctx-session-only').forEach(function(el) {{ el.style.display = isAb ? 'none' : ''; }});
+            menu.querySelectorAll('.ctx-ab-only').forEach(function(el) {{ el.style.display = isAb ? '' : 'none'; }});
             var favItem = document.getElementById('ctx-fav-item');
             favItem.textContent = favSet.has(id) ? t('Remove from Favorites') : t('Add to Favorites');
             menu.style.left = Math.min(e.clientX, window.innerWidth - 180) + 'px';
-            menu.style.top = Math.min(e.clientY, window.innerHeight - 280) + 'px';
+            menu.style.top = Math.min(e.clientY, window.innerHeight - 320) + 'px';
             menu.classList.add('active');
         }}
         function hideCtxMenu() {{ document.getElementById('ctx-menu').classList.remove('active'); }}
@@ -1188,7 +1297,107 @@ fn get_page_html(page: &str) -> String {
                     callRust('remove_peer', [ctxPeerId]);
                     setTimeout(function() {{ callRust('get_recent_sessions'); }}, 300);
                 }}
+            }} else if (action === 'ab-add') {{
+                addToAb(ctxPeerId);
+            }} else if (action === 'ab-edit') {{
+                openAbEdit(ctxPeerId);
+            }} else if (action === 'ab-remove') {{
+                removeFromAb(ctxPeerId);
             }}
+        }}
+
+        function parseTags(str) {{
+            return (str || '').split(',').map(function(s) {{ return s.trim(); }})
+                .filter(function(s) {{ return s.length > 0; }});
+        }}
+
+        function abFindPeer(id) {{
+            for (var i = 0; i < abEntry.peers.length; i++) {{
+                if (abEntry.peers[i].id === id) return abEntry.peers[i];
+            }}
+            return null;
+        }}
+
+        function syncAbTags() {{
+            var set = {{}};
+            (abEntry.tags || []).forEach(function(tg) {{ set[tg] = 1; }});
+            abEntry.peers.forEach(function(p) {{ (p.tags || []).forEach(function(tg) {{ set[tg] = 1; }}); }});
+            abEntry.tags = Object.keys(set);
+            abSelectedTags = abSelectedTags.filter(function(tg) {{ return set[tg]; }});
+        }}
+
+        function saveAbEntry() {{
+            syncAbTags();
+            callRust('save_ab', [JSON.stringify(abEntry)]);
+            sessionsData.addressbook = abEntry.peers;
+            renderAbTags();
+            renderSessions();
+        }}
+
+        function openAddId() {{
+            document.getElementById('ab-id-input').value = '';
+            document.getElementById('ab-id-alias').value = '';
+            document.getElementById('ab-id-tags').value = '';
+            openModal('ab-id-modal');
+            setTimeout(function() {{ document.getElementById('ab-id-input').focus(); }}, 100);
+        }}
+
+        function saveAddId() {{
+            var id = (document.getElementById('ab-id-input').value || '').trim().replace(/\\s+/g, '');
+            if (!id) return;
+            if (!/^[0-9]+$/.test(id)) {{ alert(t('Device ID must contain only numbers (0-9).')); return; }}
+            var alias = (document.getElementById('ab-id-alias').value || '').trim();
+            var tags = parseTags(document.getElementById('ab-id-tags').value);
+            var existing = abFindPeer(id);
+            if (existing) {{
+                existing.alias = alias || existing.alias;
+                existing.tags = tags;
+            }} else {{
+                abEntry.peers.push({{ id: id, alias: alias, tags: tags, hash: '', username: '', hostname: '', platform: '' }});
+            }}
+            closeModal('ab-id-modal');
+            saveAbEntry();
+        }}
+
+        function addToAb(id) {{
+            if (abFindPeer(id)) {{ switchTab('addressbook'); return; }}
+            var src = null;
+            (sessionsData.recent || []).forEach(function(p) {{ if (p.id === id) src = p; }});
+            abEntry.peers.push({{
+                id: id,
+                alias: (src && src.alias) || '',
+                tags: [],
+                hash: '',
+                username: (src && src.username) || '',
+                hostname: (src && src.hostname) || '',
+                platform: (src && src.platform) || ''
+            }});
+            saveAbEntry();
+            switchTab('addressbook');
+        }}
+
+        function openAbEdit(id) {{
+            var p = abFindPeer(id);
+            if (!p) return;
+            ctxPeerId = id;
+            document.getElementById('ab-edit-alias').value = p.alias || '';
+            document.getElementById('ab-edit-tags').value = (p.tags || []).join(', ');
+            openModal('ab-edit-modal');
+        }}
+
+        function saveAbEdit() {{
+            var p = abFindPeer(ctxPeerId);
+            if (!p) {{ closeModal('ab-edit-modal'); return; }}
+            p.alias = (document.getElementById('ab-edit-alias').value || '').trim();
+            p.tags = parseTags(document.getElementById('ab-edit-tags').value);
+            closeModal('ab-edit-modal');
+            saveAbEntry();
+        }}
+
+        function removeFromAb(id) {{
+            if (!confirm(t('Remove this device from the address book?'))) return;
+            abEntry.peers = abEntry.peers.filter(function(p) {{ return p.id !== id; }});
+            saveAbEntry();
         }}
 
         function openModal(id) {{ document.getElementById(id).classList.add('active'); }}
@@ -1232,6 +1441,8 @@ fn get_page_html(page: &str) -> String {
             chkEnable('opt-enable-remote-restart', 'enable-remote-restart');
             chkEnable('opt-enable-lan-discovery', 'enable-lan-discovery');
             chkEnable('opt-enable-wol', 'enable-wol');
+            var termEl = document.getElementById('opt-enable-terminal');
+            if (termEl) termEl.checked = opts['enable-terminal'] === 'Y';
             var audioEl = document.getElementById('opt-enable-audio');
             if (audioEl) audioEl.checked = opts['enable-audio'] === 'N';
             var stopEl = document.getElementById('opt-stop-service');
@@ -1329,9 +1540,9 @@ fn get_page_html(page: &str) -> String {
             var dashId = (optionsCache && optionsCache['dashboard_user_id']) || '';
             var statusEl = document.getElementById('dashboard-link-status');
             if (dashId) {{
-                statusEl.innerHTML = '<div style="margin-bottom:8px"><span style="color:var(--text-secondary)">Currently linked:</span><br><span style="font-family:monospace;font-size:12px;word-break:break-all">' + dashId + '</span></div><div style="color:var(--text-secondary);font-size:12px;margin-bottom:8px">Enter a new invite code to re-link:</div>';
+                statusEl.innerHTML = '<div style="margin-bottom:8px"><span style="color:var(--text-secondary)">' + t('Currently linked:') + '</span><br><span style="font-family:monospace;font-size:12px;word-break:break-all">' + dashId + '</span></div><div style="color:var(--text-secondary);font-size:12px;margin-bottom:8px">' + t('Enter a new invite code to re-link:') + '</div>';
             }} else {{
-                statusEl.innerHTML = '<div style="margin-bottom:8px;color:var(--text-secondary)">Enter your invite code to link this device to a dashboard.</div>';
+                statusEl.innerHTML = '<div style="margin-bottom:8px;color:var(--text-secondary)">' + t('Enter your invite code to link this device to a dashboard.') + '</div>';
             }}
             document.getElementById('dashboard-invite-input').value = '';
             document.getElementById('dashboard-link-error').style.display = 'none';
@@ -1466,9 +1677,13 @@ fn get_page_html(page: &str) -> String {
             'This Device', 'Remote Control', 'Your ID', 'Password', 'Unattended Access',
             'Copy', 'Invite', 'Set', 'Partner ID', 'Connect', 'Transfer File',
             'Recent Sessions', 'Favorites', 'Discovered', 'Search ID',
+            'Address Book', 'Add ID', 'Add to Address Book', 'Remove from Address Book',
+            'Your address book is empty.', 'Device ID must contain only numbers (0-9).',
+            'Remove this device from the address book?', 'Alias (optional)',
+            'Tags, comma separated (optional)', 'Device ID',
             'Recent sessions will show here.', 'No favorites yet.', 'No devices discovered.',
             'Settings', 'Remote Access', 'Keyboard/Mouse', 'Clipboard', 'File Transfer',
-            'Remote Restart', 'TCP Tunneling', 'Wake On LAN', 'Audio Input', 'Mute',
+            'Remote Restart', 'TCP Tunneling', 'Remote Terminal', 'Wake On LAN', 'Audio Input', 'Mute',
             'Network', 'Direct IP Access', 'LAN Discovery', 'Security',
             'Allow Incoming Connections', 'Appearance', 'Dark Theme', 'Language',
             'About', 'Close', 'Connected', 'Disconnect', 'Accept', 'Dismiss',
@@ -1490,10 +1705,19 @@ fn get_page_html(page: &str) -> String {
             'Proxy Settings', 'Hostname', 'Username',
             'Choose Network', 'HopToDesk Network (Default)', 'Custom Network Settings',
             'API URL',
-            'This software is licensed under', 'Source code is available', 'here'
+            'This software is licensed under', 'Source code is available', 'here',
+            'Currently linked:', 'Enter a new invite code to re-link:',
+            'Enter your invite code to link this device to a dashboard.'
         ];
         function loadTranslations() {{
-            callRust('translate_batch', [JSON.stringify(translationKeys)]);
+            var keySet = {{}};
+            translationKeys.forEach(function(k) {{ keySet[k] = 1; }});
+            document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {{
+                ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {{
+                    var v = el.getAttribute(a); if (v) keySet[v] = 1;
+                }});
+            }});
+            callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
         }}
         function t(key) {{
             return translations[key] || key;
@@ -1509,6 +1733,12 @@ fn get_page_html(page: &str) -> String {
                 if (el.children.length === 0) {{
                     el.textContent = t(key);
                 }}
+            }});
+            document.querySelectorAll('[data-t-title]').forEach(function(el) {{
+                el.title = t(el.getAttribute('data-t-title'));
+            }});
+            document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {{
+                el.placeholder = t(el.getAttribute('data-t-placeholder'));
             }});
             // Update About license/source lines with embedded links
             var licEl = document.getElementById('about-license');
@@ -1575,6 +1805,15 @@ fn get_page_html(page: &str) -> String {
                 var peers = (typeof data === 'string') ? JSON.parse(data) : data;
                 sessionsData.discovered = peers || [];
                 if (currentTab === 'discovered') renderSessions();
+            }} else if (method === 'get_ab') {{
+                try {{
+                    var entry = (typeof data === 'string') ? JSON.parse(data) : data;
+                    abEntry = {{ peers: (entry && entry.peers) || [], tags: (entry && entry.tags) || [], tag_colors: (entry && entry.tag_colors) || '' }};
+                    abEntry.peers.forEach(function(p) {{ if (!p.tags) p.tags = []; }});
+                    syncAbTags();
+                    sessionsData.addressbook = abEntry.peers;
+                    if (currentTab === 'addressbook') {{ renderAbTags(); renderSessions(); }}
+                }} catch(e) {{}}
             }} else if (method === 'get_option') {{
                 if (pendingOptionKey === 'unattended-access') {{
                     var isUnattended = (data === 'true');
@@ -1697,6 +1936,7 @@ fn get_page_html(page: &str) -> String {
         callRust('temporary_password');
         callRust('get_recent_sessions');
         callRust('get_fav_json');
+        callRust('get_ab');
         callRust('get_lan_peers');
         callRust('get_custom_api_url');
         getOption('unattended-access');
@@ -1794,76 +2034,79 @@ fn get_remote_page_html() -> String {
 <body>
     <div class="toolbar" id="toolbar">
         <div class="toolbar-left">
-            <button class="tb" id="fullscreen-btn" onclick="toggleFullscreen()" title="Full Screen" style="display:none">
+            <button class="tb" id="fullscreen-btn" onclick="toggleFullscreen()" title="Full Screen" data-t-title="Full Screen" style="display:none">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>
             </button>
             <span class="secure-icon" id="secure-icon" title=""></span>
-            <span class="peer-info" id="peer-info">Connecting...</span>
-            <button class="tb" id="display-selector-btn" onclick="toggleDropdown('display-switch-menu',this)" style="display:none" title="Switch Display">
+            <span class="peer-info" id="peer-info" data-t="Connecting...">Connecting...</span>
+            <button class="tb" id="display-selector-btn" onclick="toggleDropdown('display-switch-menu',this)" style="display:none" title="Switch Display" data-t-title="Switch Display">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><path d="M8 21h8m-4-4v4"/></svg>
                 <span id="display-num"></span>
             </button>
         </div>
         <div class="toolbar-sep" id="sep1" style="display:none"></div>
         <div class="toolbar-center" id="toolbar-btns" style="display:none">
-            <button class="tb" id="chat-btn" onclick="toggleChat()" title="Chat">
+            <button class="tb" id="chat-btn" onclick="toggleChat()" title="Chat" data-t-title="Chat">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
             </button>
-            <button class="tb" id="action-btn" onclick="toggleDropdown('action-menu',this)" title="Control Actions">
+            <button class="tb" id="action-btn" onclick="toggleDropdown('action-menu',this)" title="Control Actions" data-t-title="Control Actions">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg>
             </button>
-            <button class="tb" id="display-settings-btn" onclick="toggleDropdown('display-settings-menu',this)" title="Display Settings">
+            <button class="tb" id="display-settings-btn" onclick="toggleDropdown('display-settings-menu',this)" title="Display Settings" data-t-title="Display Settings">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><path d="M8 21h8m-4-4v4"/></svg>
             </button>
-            <button class="tb" id="keyboard-btn" onclick="toggleKeyboard()" title="Keyboard">
+            <button class="tb" id="keyboard-btn" onclick="toggleKeyboard()" title="Keyboard" data-t-title="Keyboard">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M10 12h.01M14 12h.01M18 12h.01M8 16h8"/></svg>
             </button>
             <div class="toolbar-sep"></div>
-            <button class="tb" id="file-transfer-btn" onclick="openFileTransfer()" title="Transfer File">
+            <button class="tb" id="file-transfer-btn" onclick="openFileTransfer()" title="Transfer File" data-t-title="Transfer File">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 18v-6m-3 3l3-3 3 3"/></svg>
             </button>
-            <button class="tb" id="screenshot-btn" onclick="takeScreenshot()" title="Screenshot">
+            <button class="tb" id="screenshot-btn" onclick="takeScreenshot()" title="Screenshot" data-t-title="Screenshot">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/></svg>
             </button>
-            <button class="tb" id="record-btn" onclick="toggleRecording()" title="Record Session">
+            <button class="tb" id="record-btn" onclick="toggleRecording()" title="Record Session" data-t-title="Record Session">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="4" fill="currentColor"/></svg>
             </button>
-            <button class="tb" id="switch-sides-btn" onclick="callRust('switch_sides')" title="Switch Sides" style="display:none">
+            <button class="tb" id="add-dashboard-btn" onclick="callRust('request_add_to_dashboard')" title="Add to my Dashboard" data-t-title="Add to my Dashboard" style="display:none">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="12" rx="2"/><path d="M12 16v4m-4 0h8"/><path d="M12 7v6m-3-3h6"/></svg>
+            </button>
+            <button class="tb" id="switch-sides-btn" onclick="callRust('switch_sides')" title="Switch Sides" data-t-title="Switch Sides" style="display:none">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 3l4 4-4 4"/><path d="M20 7H4"/><path d="M8 21l-4-4 4-4"/><path d="M4 17h16"/></svg>
             </button>
-            <button class="tb" id="privacy-mode-btn" onclick="togglePrivacyMode()" title="Privacy Mode" style="display:none">
+            <button class="tb" id="privacy-mode-btn" onclick="togglePrivacyMode()" title="Privacy Mode" data-t-title="Privacy Mode" style="display:none">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0-4 0"/><path d="M21 12c-2.4 4-5.4 6-9 6c-3.6 0-6.6-2-9-6c2.4-4 5.4-6 9-6c3.6 0 6.6 2 9 6"/></svg>
             </button>
-            <button class="tb" id="block-input-btn" title="Input Blocked" style="display:none;color:#EF4444">
+            <button class="tb" id="block-input-btn" title="Input Blocked" data-t-title="Input Blocked" style="display:none;color:#EF4444">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="4.93" y1="4.93" x2="19.07" y2="19.07"/></svg>
             </button>
         </div>
         <div class="toolbar-right">
             <button class="tb danger" onclick="disconnect()">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18.36 5.64a9 9 0 1 1-12.73 0"/><line x1="12" y1="2" x2="12" y2="12"/></svg>
-                <span class="label">Disconnect</span>
+                <span class="label" data-t="Disconnect">Disconnect</span>
             </button>
         </div>
 
         <div class="dropdown" id="action-menu">
-            <div class="dd-item" onclick="callRust('ctrl_alt_del');hideDropdowns()">Ctrl + Alt + Del</div>
-            <div class="dd-item" onclick="callRust('lock_screen');hideDropdowns()">Lock Screen</div>
-            <div class="dd-item" onclick="callRust('restart_remote_device');hideDropdowns()">Restart Remote Device</div>
+            <div class="dd-item" onclick="callRust('ctrl_alt_del');hideDropdowns()" data-t="Ctrl + Alt + Del">Ctrl + Alt + Del</div>
+            <div class="dd-item" onclick="callRust('lock_screen');hideDropdowns()" data-t="Lock Screen">Lock Screen</div>
+            <div class="dd-item" onclick="callRust('restart_remote_device');hideDropdowns()" data-t="Restart Remote Device">Restart Remote Device</div>
             <div class="dd-sep"></div>
-            <div class="dd-item" onclick="callRust('refresh');hideDropdowns()">Refresh</div>
+            <div class="dd-item" onclick="callRust('refresh');hideDropdowns()" data-t="Refresh">Refresh</div>
         </div>
 
         <div class="dropdown" id="display-settings-menu">
-            <div class="dd-header">View Style</div>
-            <div class="dd-item selected" data-style="shrink" onclick="setViewStyle('shrink')">Shrink</div>
-            <div class="dd-item" data-style="original" onclick="setViewStyle('original')">Original</div>
-            <div class="dd-item" data-style="stretch" onclick="setViewStyle('stretch')">Stretch</div>
+            <div class="dd-header" data-t="View Style">View Style</div>
+            <div class="dd-item selected" data-style="shrink" onclick="setViewStyle('shrink')" data-t="Shrink">Shrink</div>
+            <div class="dd-item" data-style="original" onclick="setViewStyle('original')" data-t="Original">Original</div>
+            <div class="dd-item" data-style="stretch" onclick="setViewStyle('stretch')" data-t="Stretch">Stretch</div>
             <div class="dd-sep"></div>
-            <div class="dd-header">Image Quality</div>
-            <div class="dd-item selected" data-quality="balanced" onclick="setImageQuality('balanced')">Balanced</div>
-            <div class="dd-item" data-quality="best" onclick="setImageQuality('best')">Best image quality</div>
-            <div class="dd-item" data-quality="low" onclick="setImageQuality('low')">Optimize reaction time</div>
-            <div class="dd-item" data-quality="custom" onclick="setImageQuality('custom')">Custom</div>
+            <div class="dd-header" data-t="Image Quality">Image Quality</div>
+            <div class="dd-item selected" data-quality="balanced" onclick="setImageQuality('balanced')" data-t="Balanced">Balanced</div>
+            <div class="dd-item" data-quality="best" onclick="setImageQuality('best')" data-t="Best image quality">Best image quality</div>
+            <div class="dd-item" data-quality="low" onclick="setImageQuality('low')" data-t="Optimize reaction time">Optimize reaction time</div>
+            <div class="dd-item" data-quality="custom" onclick="setImageQuality('custom')" data-t="Custom">Custom</div>
         </div>
 
         <div class="dropdown" id="display-switch-menu"></div>
@@ -1871,41 +2114,41 @@ fn get_remote_page_html() -> String {
 
     <div class="canvas-wrap" id="canvas-wrap">
         <div class="status-overlay" id="status-overlay">
-            <h2 id="status-title">Connecting...</h2>
-            <p id="status-text">Establishing connection to remote device</p>
+            <h2 id="status-title" data-t="Connecting...">Connecting...</h2>
+            <p id="status-text" data-t="Establishing connection to remote device">Establishing connection to remote device</p>
         </div>
         <canvas id="remote-canvas"></canvas>
         <div class="quality-bar" id="quality-bar"></div>
     </div>
 
     <div class="chat-panel" id="chat-panel">
-        <div class="chat-header"><span>Chat</span><button class="chat-close" onclick="toggleChat()">&times;</button></div>
+        <div class="chat-header"><span data-t="Chat">Chat</span><button class="chat-close" onclick="toggleChat()">&times;</button></div>
         <div class="chat-messages" id="chat-messages"></div>
         <div class="chat-input-wrap">
-            <input id="chat-input" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendChat()">
-            <button onclick="sendChat()">Send</button>
+            <input id="chat-input" placeholder="Type a message..." data-t-placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendChat()">
+            <button onclick="sendChat()" data-t="Send">Send</button>
         </div>
     </div>
 
     <div class="modal-overlay" id="password-modal">
         <div class="modal">
-            <h2 id="pw-dialog-title">Enter Password</h2>
-            <p id="pw-dialog-text">Please enter the password for the remote device.</p>
-            <input type="password" id="pw-input" placeholder="Password"
+            <h2 id="pw-dialog-title" data-t="Enter Password">Enter Password</h2>
+            <p id="pw-dialog-text" data-t="Please enter the password for the remote device.">Please enter the password for the remote device.</p>
+            <input type="password" id="pw-input" placeholder="Password" data-t-placeholder="Password"
                    onkeydown="if(event.key==='Enter')submitPassword()">
             <div class="modal-buttons">
-                <button class="modal-btn secondary" onclick="cancelPassword()">Cancel</button>
-                <button class="modal-btn primary" onclick="submitPassword()">OK</button>
+                <button class="modal-btn secondary" onclick="cancelPassword()" data-t="Cancel">Cancel</button>
+                <button class="modal-btn primary" onclick="submitPassword()" data-t="OK">OK</button>
             </div>
         </div>
     </div>
 
     <div class="modal-overlay" id="msg-modal">
         <div class="modal">
-            <h2 id="msg-title">Message</h2>
+            <h2 id="msg-title" data-t="Message">Message</h2>
             <p id="msg-text"></p>
             <div class="modal-buttons" id="msg-buttons">
-                <button class="modal-btn primary" onclick="closeMsgBox()">OK</button>
+                <button class="modal-btn primary" onclick="closeMsgBox()" data-t="OK">OK</button>
             </div>
         </div>
     </div>
@@ -1924,6 +2167,38 @@ var displays = [];
 var currentDisplay = 0;
 var peerPlatform = '';
 var chatMessages = [];
+
+
+var translations = {};
+function t(key) { return translations[key] || key; }
+function applyTranslations() {
+    document.querySelectorAll('[data-t]').forEach(function(el) {
+        if (el.children.length === 0) el.textContent = t(el.getAttribute('data-t'));
+    });
+    document.querySelectorAll('[data-t-title]').forEach(function(el) {
+        el.title = t(el.getAttribute('data-t-title'));
+    });
+    document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {
+        el.placeholder = t(el.getAttribute('data-t-placeholder'));
+    });
+}
+function loadTranslations(extraKeys) {
+    var keySet = {};
+    (extraKeys || []).forEach(function(k) { keySet[k] = 1; });
+    document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {
+        ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {
+            var v = el.getAttribute(a); if (v) keySet[v] = 1;
+        });
+    });
+    callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
+}
+function handleTranslateBatchResult(data) {
+    try {
+        var tr = (typeof data === 'string') ? JSON.parse(data) : data;
+        if (tr && typeof tr === 'object') { for (var k in tr) translations[k] = tr[k]; }
+        applyTranslations();
+    } catch(e) {}
+}
 
 function callRust(method, args) {
     window.ipc.postMessage(JSON.stringify({ method: method, args: args || [] }));
@@ -2095,22 +2370,23 @@ document.addEventListener('click', function(e) {
 });
 
 window.onRustResponse = function(method, data) {
+    if (method === 'translate_batch_result') { handleTranslateBatchResult(data); return; }
     try {
         if (method === 'msgbox') {
             currentMsgType = data.type || '';
             if (data.type === 'input-password' || data.type === 'password') {
                 document.getElementById('msg-modal').classList.remove('active');
-                document.getElementById('pw-dialog-title').textContent = data.title || 'Enter Password';
-                document.getElementById('pw-dialog-text').textContent = data.text || 'Please enter the password.';
+                document.getElementById('pw-dialog-title').textContent = t(data.title || 'Enter Password');
+                document.getElementById('pw-dialog-text').textContent = t(data.text || 'Please enter the password for the remote device.');
                 document.getElementById('password-modal').classList.add('active');
                 setTimeout(function() { document.getElementById('pw-input').focus(); }, 100);
             } else if (data.type === 'connecting') {
-                document.getElementById('status-title').textContent = data.title || 'Connecting...';
-                document.getElementById('status-text').textContent = data.text || '';
+                document.getElementById('status-title').textContent = t(data.title || 'Connecting...');
+                document.getElementById('status-text').textContent = t(data.text || '');
             } else {
                 document.getElementById('password-modal').classList.remove('active');
-                document.getElementById('msg-title').textContent = data.title || 'Message';
-                document.getElementById('msg-text').textContent = data.text || '';
+                document.getElementById('msg-title').textContent = t(data.title || 'Message');
+                document.getElementById('msg-text').textContent = t(data.text || '');
                 document.getElementById('msg-modal').classList.add('active');
             }
         } else if (method === 'set_frame_port') {
@@ -2150,10 +2426,15 @@ window.onRustResponse = function(method, data) {
             var info = (data.username ? data.username + '@' : '') + (data.hostname || '');
             if (data.platform) { info += ' (' + data.platform + ')'; peerPlatform = data.platform; }
             document.getElementById('peer-info').textContent = info;
+            peerDashLinked = !!data.dashboard_linked;
+            updateAddDashboardBtn();
             if (data.platform === 'Windows' || data.platform === 'Mac OS' || data.platform === 'Linux') {
                 document.getElementById('switch-sides-btn').style.display = 'flex';
                 document.getElementById('privacy-mode-btn').style.display = 'flex';
             }
+        } else if (method === 'has_dashboard_link') {
+            hasDashLink = (data === true || data === 'true');
+            updateAddDashboardBtn();
         } else if (method === 'set_connection_type') {
             var icon = document.getElementById('secure-icon');
             var secured = data.secured;
@@ -2281,6 +2562,14 @@ canvas.addEventListener('wheel', function(e) {
 });
 
 canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
+var hasDashLink = false;
+var peerDashLinked = false;
+function updateAddDashboardBtn() {
+    var el = document.getElementById('add-dashboard-btn');
+    if (el) el.style.display = (hasDashLink && !peerDashLinked) ? 'flex' : 'none';
+}
+callRust('has_dashboard_link');
+loadTranslations(['Connection Error','Successful','Connected, waiting for image...','Reconnecting','Reconnecting...','Enter Password','Please enter the password for the remote device.','Connecting...','Message','Establishing connection to remote device']);
 </script>
 </body>
 </html>"##.to_string()
@@ -2391,16 +2680,16 @@ fn get_cm_page_html() -> String {
     <div class="main" id="main-area">
         <div class="left-panel" id="left-panel">
             <div class="empty-state" id="empty-state">
-                <p>Waiting for new connection ...</p>
+                <p data-t="Waiting for new connection ...">Waiting for new connection ...</p>
             </div>
             <div id="conn-view"></div>
         </div>
         <div class="right-panel" id="right-panel">
-            <div class="chat-header">Chat</div>
+            <div class="chat-header" data-t="Chat">Chat</div>
             <div class="chat-msgs" id="chat-msgs"></div>
             <div class="chat-input-row">
-                <input id="chat-input" placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendChatMsg()">
-                <button onclick="sendChatMsg()">Send</button>
+                <input id="chat-input" placeholder="Type a message..." data-t-placeholder="Type a message..." onkeydown="if(event.key==='Enter')sendChatMsg()">
+                <button onclick="sendChatMsg()" data-t="Send">Send</button>
             </div>
         </div>
     </div>
@@ -2409,6 +2698,38 @@ var connections = {};
 var curId = -1;
 var showChat = false;
 var showSecCode = false;
+
+
+var translations = {};
+function t(key) { return translations[key] || key; }
+function applyTranslations() {
+    document.querySelectorAll('[data-t]').forEach(function(el) {
+        if (el.children.length === 0) el.textContent = t(el.getAttribute('data-t'));
+    });
+    document.querySelectorAll('[data-t-title]').forEach(function(el) {
+        el.title = t(el.getAttribute('data-t-title'));
+    });
+    document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {
+        el.placeholder = t(el.getAttribute('data-t-placeholder'));
+    });
+}
+function loadTranslations(extraKeys) {
+    var keySet = {};
+    (extraKeys || []).forEach(function(k) { keySet[k] = 1; });
+    document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {
+        ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {
+            var v = el.getAttribute(a); if (v) keySet[v] = 1;
+        });
+    });
+    callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
+}
+function handleTranslateBatchResult(data) {
+    try {
+        var tr = (typeof data === 'string') ? JSON.parse(data) : data;
+        if (tr && typeof tr === 'object') { for (var k in tr) translations[k] = tr[k]; }
+        applyTranslations();
+    } catch(e) {}
+}
 
 function callRust(method, args) {
     window.ipc.postMessage(JSON.stringify({ method: method, args: args || [] }));
@@ -2480,29 +2801,33 @@ function renderCurrent() {
     var c = connections[curId];
     var html = '<div class="conn-content">';
     if (!c.is_file_transfer && !c.is_port_forward) {
-        html += '<div class="chat-icon" onclick="toggleChat()" title="Chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>';
+        html += '<div class="chat-icon" onclick="toggleChat()" title="Chat" data-t-title="Chat"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg></div>';
     }
     html += '<div class="icon-and-id">';
     html += '<div class="avatar" style="background:' + string2RGB(c.name || 'NA') + '">' + getInitial(c.name) + '</div>';
     html += '<div class="id-block">';
     html += '<div class="peer-name">' + esc(c.name || 'NA') + '</div>';
     html += '<div class="peer-id">(' + esc(c.peer_id) + ')</div>';
-    html += '<div class="conn-time-row">' + (c.authorized ? 'Connected ' : 'Waiting... ') + '<span id="elapsed">' + (c.authorized ? getElapsed(c.startTime) : '') + '</span></div>';
+    html += '<div class="conn-time-row">' + (c.authorized ? t('Connected') + ' ' : t('Waiting...') + ' ') + '<span id="elapsed">' + (c.authorized ? getElapsed(c.startTime) : '') + '</span></div>';
     if (c.security_numbers && !c.is_file_transfer && !c.is_port_forward) {
-        html += '<span class="sec-toggle' + (showSecCode ? ' active' : '') + '" onclick="toggleSecCode()">Security Code</span>';
+        html += '<span class="sec-toggle' + (showSecCode ? ' active' : '') + '" onclick="toggleSecCode()">' + t('Security Code') + '</span>';
     }
     html += '</div></div>';
     if (c.security_numbers && showSecCode) {
         html += '<div class="sec-code show">' + esc(c.security_numbers) + '</div>';
     }
     if (c.is_invite) {
-        html += '<div class="invite-msg">Accept invite to connect to this computer?</div>';
+        html += '<div class="invite-msg">' + t('Accept invite to connect to this computer?') + '</div>';
+    }
+    if (c.incoming_link_dashboard) {
+        var who = c.link_dashboard_account_name ? esc(c.link_dashboard_account_name) + String.fromCharCode(8217) + 's' : t("this technician's");
+        html += '<div class="invite-msg">' + esc(t('Add this computer to {} HopToDesk Dashboard?')).replace('{}', who) + '<br><span style="font-weight:400">' + esc(t('They will be able to see when this computer is online and provide remote support. You can undo this anytime in Settings → Dashboard.')) + '</span></div>';
     }
     if (c.is_port_forward) {
-        html += '<div class="port-info">Port Forwarding: ' + esc(c.port_forward || '') + '</div>';
+        html += '<div class="port-info">' + t('Port Forwarding:') + ' ' + esc(c.port_forward || '') + '</div>';
     }
     if (!c.is_file_transfer && !c.is_port_forward && !c.disconnected && c.authorized && !c.is_invite) {
-        html += '<div class="section-label">Permissions</div>';
+        html += '<div class="section-label">' + t('Permissions') + '</div>';
         html += '<div class="permissions">';
         var perms = ['keyboard','clipboard','audio','file','restart'];
         for (var p = 0; p < perms.length; p++) {
@@ -2514,16 +2839,19 @@ function renderCurrent() {
     }
     html += '</div>';
     html += '<div class="buttons">';
-    if (c.is_invite) {
-        html += '<button class="btn-accept" onclick="callRust(\'cm_accept_invite\',[' + c.id + '])">Accept</button>';
-        html += '<button class="btn-dismiss" onclick="callRust(\'cm_decline_invite\',[' + c.id + '])">Dismiss</button>';
+    if (c.incoming_link_dashboard) {
+        html += '<button class="btn-accept" onclick="respondLinkDash(' + c.id + ',true)">' + t('Accept') + '</button>';
+        html += '<button class="btn-dismiss" onclick="respondLinkDash(' + c.id + ',false)">' + t('Dismiss') + '</button>';
+    } else if (c.is_invite) {
+        html += '<button class="btn-accept" onclick="callRust(\'cm_accept_invite\',[' + c.id + '])">' + t('Accept') + '</button>';
+        html += '<button class="btn-dismiss" onclick="callRust(\'cm_decline_invite\',[' + c.id + '])">' + t('Dismiss') + '</button>';
     } else if (c.disconnected) {
-        html += '<button class="btn-disconnect" onclick="doRemove(' + c.id + ')">Close</button>';
+        html += '<button class="btn-disconnect" onclick="doRemove(' + c.id + ')">' + t('Close') + '</button>';
     } else if (!c.authorized) {
-        html += '<button class="btn-accept" onclick="doAuthorize(' + c.id + ')">Accept</button>';
-        html += '<button class="btn-dismiss" onclick="doClose(' + c.id + ')">Dismiss</button>';
+        html += '<button class="btn-accept" onclick="doAuthorize(' + c.id + ')">' + t('Accept') + '</button>';
+        html += '<button class="btn-dismiss" onclick="doClose(' + c.id + ')">' + t('Dismiss') + '</button>';
     } else {
-        html += '<button class="btn-disconnect" onclick="doClose(' + c.id + ')">Disconnect</button>';
+        html += '<button class="btn-disconnect" onclick="doClose(' + c.id + ')">' + t('Disconnect') + '</button>';
     }
     html += '</div>';
     view.innerHTML = html;
@@ -2572,6 +2900,14 @@ function renderChatMessages() {
     }
     el.innerHTML = html;
     el.scrollTop = el.scrollHeight;
+}
+
+function respondLinkDash(id, accept) {
+    callRust('cm_link_dashboard_response', [id, accept]);
+    if (connections[id]) {
+        connections[id].incoming_link_dashboard = false;
+        renderCurrent();
+    }
 }
 
 function doAuthorize(id) {
@@ -2623,6 +2959,7 @@ setInterval(function() {
 }, 1000);
 
 window.onRustResponse = function(method, data) {
+    if (method === 'translate_batch_result') { handleTranslateBatchResult(data); return; }
     try {
         if (method === 'add_connection') {
             if (connections[data.id]) {
@@ -2638,6 +2975,13 @@ window.onRustResponse = function(method, data) {
             }
             renderCurrent();
             renderTabs();
+        } else if (method === 'update_link_dashboard') {
+            var ld = (typeof data === 'string') ? JSON.parse(data) : data;
+            if (connections[ld.id]) {
+                connections[ld.id].incoming_link_dashboard = !!ld.incoming;
+                connections[ld.id].link_dashboard_account_name = ld.account_name || '';
+                renderCurrent();
+            }
         } else if (method === 'remove_connection') {
             if (data.close) {
                 delete connections[data.id];
@@ -2681,6 +3025,7 @@ window.onRustResponse = function(method, data) {
         console.error('CM error:', err);
     }
 };
+loadTranslations(['Connected','Waiting...','Security Code','Accept invite to connect to this computer?','Port Forwarding:','Permissions','Accept','Dismiss','Close','Disconnect','Chat','Add this computer to {} HopToDesk Dashboard?',"this technician's",'They will be able to see when this computer is online and provide remote support. You can undo this anytime in Settings → Dashboard.']);
 </script>
 </body>
 </html>"##.to_string()
@@ -2830,7 +3175,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 
 <div class="modal-overlay" id="override-modal">
     <div class="modal">
-        <h3>File Already Exists</h3>
+        <h3 data-t="File Already Exists">File Already Exists</h3>
         <p id="override-msg">Overwrite?</p>
         <label style="font-size:12px;display:block;margin-bottom:12px"><input type="checkbox" id="override-remember"> Remember for remaining files</label>
         <div class="btns">
@@ -2841,7 +3186,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 </div>
 <div class="modal-overlay" id="delete-modal">
     <div class="modal">
-        <h3>Confirm Delete</h3>
+        <h3 data-t="Confirm Delete">Confirm Delete</h3>
         <p id="delete-msg"></p>
         <div class="btns">
             <button class="btn-secondary" onclick="deleteConfirm(false)">Cancel</button>
@@ -2883,6 +3228,38 @@ var pendingOverride = null;
 var pendingDelete = null;
 var homeDir = '';
 var connected = false;
+
+
+var translations = {};
+function t(key) { return translations[key] || key; }
+function applyTranslations() {
+    document.querySelectorAll('[data-t]').forEach(function(el) {
+        if (el.children.length === 0) el.textContent = t(el.getAttribute('data-t'));
+    });
+    document.querySelectorAll('[data-t-title]').forEach(function(el) {
+        el.title = t(el.getAttribute('data-t-title'));
+    });
+    document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {
+        el.placeholder = t(el.getAttribute('data-t-placeholder'));
+    });
+}
+function loadTranslations(extraKeys) {
+    var keySet = {};
+    (extraKeys || []).forEach(function(k) { keySet[k] = 1; });
+    document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {
+        ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {
+            var v = el.getAttribute(a); if (v) keySet[v] = 1;
+        });
+    });
+    callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
+}
+function handleTranslateBatchResult(data) {
+    try {
+        var tr = (typeof data === 'string') ? JSON.parse(data) : data;
+        if (tr && typeof tr === 'object') { for (var k in tr) translations[k] = tr[k]; }
+        applyTranslations();
+    } catch(e) {}
+}
 
 function callRust(method, args) {
     window.ipc.postMessage(JSON.stringify({method: method, args: args || []}));
@@ -3141,6 +3518,7 @@ function cancelJob(id) {
 }
 
 window.onRustResponse = function(method, data) {
+    if (method === 'translate_batch_result') { handleTranslateBatchResult(data); return; }
     if (method === 'on_connected') {
         connected = true;
         document.getElementById('password-modal').classList.remove('active');
@@ -3234,6 +3612,7 @@ window.onRustResponse = function(method, data) {
     }
 };
 callRust('get_option', ['allow-darktheme']);
+loadTranslations([]);
 </script>
 </body>
 </html>"##.to_string()
@@ -3309,7 +3688,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
     <div class="status-sub" id="status-sub">Setting up port forwarding tunnel</div>
     <div class="duration" id="duration" style="display:none">00:00</div>
     <div class="tunnel-info" id="tunnel-info" style="display:none"></div>
-    <div class="tip" id="tip" style="display:none">Do not close this window while the tunnel is active</div>
+    <div class="tip" id="tip" style="display:none" data-t="Do not close this window while the tunnel is active">Do not close this window while the tunnel is active</div>
 </div>
 <div class="modal-overlay" id="pw-modal">
     <div class="modal">
@@ -3335,6 +3714,38 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; b
 var connected = false;
 var startTime = null;
 var durationTimer = null;
+
+
+var translations = {};
+function t(key) { return translations[key] || key; }
+function applyTranslations() {
+    document.querySelectorAll('[data-t]').forEach(function(el) {
+        if (el.children.length === 0) el.textContent = t(el.getAttribute('data-t'));
+    });
+    document.querySelectorAll('[data-t-title]').forEach(function(el) {
+        el.title = t(el.getAttribute('data-t-title'));
+    });
+    document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {
+        el.placeholder = t(el.getAttribute('data-t-placeholder'));
+    });
+}
+function loadTranslations(extraKeys) {
+    var keySet = {};
+    (extraKeys || []).forEach(function(k) { keySet[k] = 1; });
+    document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {
+        ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {
+            var v = el.getAttribute(a); if (v) keySet[v] = 1;
+        });
+    });
+    callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
+}
+function handleTranslateBatchResult(data) {
+    try {
+        var tr = (typeof data === 'string') ? JSON.parse(data) : data;
+        if (tr && typeof tr === 'object') { for (var k in tr) translations[k] = tr[k]; }
+        applyTranslations();
+    } catch(e) {}
+}
 
 function callRust(method, args) {
     window.ipc.postMessage(JSON.stringify({ method: method, args: Array.isArray(args) ? args : [args] }));
@@ -3400,6 +3811,7 @@ function showTunnel(localPort, remoteHost, remotePort) {
 }
 
 window.onRustResponse = function(method, data) {
+    if (method === 'translate_batch_result') { handleTranslateBatchResult(data); return; }
     try {
         if (method === 'msgbox') {
             if (data.type === 'input-password' || data.type === 'password') {
@@ -3435,6 +3847,201 @@ window.onRustResponse = function(method, data) {
     }
 };
 callRust('get_option', ['allow-darktheme']);
+loadTranslations([]);
+</script>
+</body>
+</html>"##.to_string()
+}
+
+fn get_terminal_page_html() -> String {
+    r##"<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Terminal</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; background: #101014; overflow: hidden; }
+        #term { position: absolute; top: 4px; left: 6px; right: 0; bottom: 0;
+                font-family: Menlo, 'DejaVu Sans Mono', monospace; font-size: 13px; line-height: 1.25;
+                color: #d8d8d8; white-space: pre; outline: none; cursor: text; }
+        .trow { height: 16.25px; }
+        #measure { position: absolute; visibility: hidden; white-space: pre;
+                   font-family: Menlo, 'DejaVu Sans Mono', monospace; font-size: 13px; line-height: 1.25; }
+        #overlay { display: none; position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+                   background: rgba(0,0,0,0.75); color: #ccc; text-align: center; padding-top: 20%;
+                   font-family: -apple-system, sans-serif; font-size: 15px; z-index: 10; }
+        #overlay.show { display: block; }
+    </style>
+</head>
+<body>
+    <div id="term" tabindex="0"></div>
+    <span id="measure">W</span>
+    <div id="overlay"><span id="overlay-text"></span></div>
+<script>
+function callRust(method, args) {
+    window.ipc.postMessage(JSON.stringify({ method: method, args: args || [] }));
+}
+
+var rows = [];
+var appCursor = false;
+var bracketedPaste = false;
+var curRows = 24, curCols = 80;
+var closed = false;
+
+function ensureRows(n) {
+    var term = document.getElementById('term');
+    while (rows.length < n) {
+        var el = document.createElement('div');
+        el.className = 'trow';
+        term.appendChild(el);
+        rows.push(el);
+    }
+    while (rows.length > n) {
+        var last = rows.pop();
+        last.remove();
+    }
+}
+
+function applyUpdate(u) {
+    appCursor = !!u.app_cursor;
+    bracketedPaste = !!u.bracketed_paste;
+    if (u.full) ensureRows(curRows);
+    for (var i = 0; i < u.rows.length; i++) {
+        var d = u.rows[i];
+        if (d.r >= rows.length) ensureRows(d.r + 1);
+        rows[d.r].innerHTML = d.h;
+    }
+}
+
+function measureCell() {
+    var m = document.getElementById('measure');
+    var r = m.getBoundingClientRect();
+    return { w: r.width, h: r.height };
+}
+
+var resizeTimer = null;
+function doResize() {
+    var cell = measureCell();
+    if (!cell.w || !cell.h) return;
+    var availW = window.innerWidth - 8;
+    var availH = window.innerHeight - 6;
+    var cols = Math.max(20, Math.floor(availW / cell.w));
+    var nrows = Math.max(5, Math.floor(availH / (cell.h)));
+    if (cols !== curCols || nrows !== curRows) {
+        curCols = cols; curRows = nrows;
+        ensureRows(nrows);
+        callRust('terminal_resize', [nrows, cols]);
+    }
+}
+window.addEventListener('resize', function() {
+    clearTimeout(resizeTimer);
+    resizeTimer = setTimeout(doResize, 200);
+});
+
+function sendInput(text) {
+    if (!closed && text) callRust('terminal_input', [text]);
+}
+
+function pasteClipboard() {
+    if (navigator.clipboard && navigator.clipboard.readText) {
+        navigator.clipboard.readText().then(function(text) {
+            if (!text) return;
+            if (bracketedPaste) text = '\x1b[200~' + text + '\x1b[201~';
+            sendInput(text);
+        });
+    }
+}
+
+document.addEventListener('keydown', function(e) {
+    if (closed) return;
+    var k = e.key;
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && (k === 'V' || k === 'v')) {
+        e.preventDefault(); pasteClipboard(); return;
+    }
+    if (e.metaKey && (k === 'v' || k === 'V')) {
+        e.preventDefault(); pasteClipboard(); return;
+    }
+    if (e.metaKey) return;
+    var seq = null;
+    if (e.ctrlKey && k.length === 1) {
+        var c = k.toLowerCase().charCodeAt(0);
+        if (c >= 97 && c <= 122) seq = String.fromCharCode(c - 96);
+        else if (k === '[') seq = '\x1b';
+        else if (k === ']') seq = '\x1d';
+        else if (k === '\\') seq = '\x1c';
+    } else if (k.length === 1) {
+        seq = k;
+    } else {
+        var pre = appCursor ? '\x1bO' : '\x1b[';
+        switch (k) {
+            case 'Enter': seq = '\r'; break;
+            case 'Backspace': seq = '\x7f'; break;
+            case 'Tab': seq = e.shiftKey ? '\x1b[Z' : '\t'; break;
+            case 'Escape': seq = '\x1b'; break;
+            case 'ArrowUp': seq = pre + 'A'; break;
+            case 'ArrowDown': seq = pre + 'B'; break;
+            case 'ArrowRight': seq = pre + 'C'; break;
+            case 'ArrowLeft': seq = pre + 'D'; break;
+            case 'Home': seq = '\x1b[H'; break;
+            case 'End': seq = '\x1b[F'; break;
+            case 'Delete': seq = '\x1b[3~'; break;
+            case 'Insert': seq = '\x1b[2~'; break;
+            case 'PageUp': seq = '\x1b[5~'; break;
+            case 'PageDown': seq = '\x1b[6~'; break;
+        }
+    }
+    if (seq !== null) {
+        e.preventDefault();
+        sendInput(seq);
+    }
+});
+
+window.onRustResponse = function(method, data) {
+    try {
+        if (typeof data === 'string' && data.length && (data[0] === '{' || data[0] === '[')) {
+            try { data = JSON.parse(data); } catch (e) {}
+        }
+        if (method === 'terminalUpdate') {
+            applyUpdate(data);
+        } else if (method === 'terminalOpened') {
+            if (data && data.success === false) {
+                showOverlay(data.message || 'Failed to open terminal');
+            } else {
+                hideOverlay();
+                doResize();
+            }
+        } else if (method === 'terminalClosed') {
+            closed = true;
+            showOverlay('Session ended (exit code ' + (data && data.exit_code !== undefined ? data.exit_code : '?') + ')');
+        } else if (method === 'terminalError') {
+            showOverlay((data && data.message) || 'Terminal error');
+        } else if (method === 'msgbox') {
+            if (data && (data.type || '').indexOf('error') >= 0) {
+                showOverlay((data.title || '') + ': ' + (data.text || ''));
+            } else if (data && data.type === 'connecting') {
+                showOverlay(data.title || 'Connecting...');
+            } else {
+                hideOverlay();
+            }
+        } else if (method === 'cancel_msgbox') {
+            hideOverlay();
+        }
+    } catch (e) {}
+};
+
+function showOverlay(text) {
+    document.getElementById('overlay-text').textContent = text;
+    document.getElementById('overlay').className = 'show';
+}
+function hideOverlay() {
+    document.getElementById('overlay').className = '';
+}
+
+ensureRows(curRows);
+document.getElementById('term').focus();
+document.addEventListener('click', function() { document.getElementById('term').focus(); });
+setTimeout(doResize, 400);
 </script>
 </body>
 </html>"##.to_string()
@@ -3495,6 +4102,11 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 .file-btn { padding:6px 14px; border:1px solid var(--border); border-radius:6px; background:transparent; color:var(--text); cursor:pointer; font-size:13px; }
 .file-btn:hover { border-color:var(--secondary); }
 .file-name { font-size:13px; color:var(--secondary); }
+.field-hint { font-size:12px; color:var(--secondary); margin-top:4px; }
+.ticket-destination { font-size:13px; padding:10px 12px; margin-bottom:12px; border-radius:6px; background:var(--info-bg, #E3F2FD); border:1px solid var(--border); }
+.ticket-destination.warn { background:#FFF3CD; border-color:#FFE08A; color:#664D03; }
+.reply-attachment-row { display:flex; align-items:center; gap:8px; margin:8px 0 0; }
+.status-badge { display:inline-block; margin-left:8px; padding:2px 8px; border-radius:10px; font-size:12px; background:var(--border); color:var(--text); }
 .file-remove { cursor:pointer; color:#dc3545; font-weight:bold; font-size:14px; }
 .form-actions { text-align:right; margin-top:16px; padding-top:12px; border-top:1px solid var(--border); }
 .btn { padding:8px 20px; border:none; border-radius:6px; font-size:14px; font-weight:600; cursor:pointer; }
@@ -3548,8 +4160,8 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 </head>
 <body>
 <div class="tabs">
-    <div class="tab active" id="tab-new" onclick="switchTab('new')">New Ticket</div>
-    <div class="tab" id="tab-my" onclick="switchTab('my')">My Tickets</div>
+    <div class="tab active" id="tab-new" onclick="switchTab('new')" data-t="New Ticket">New Ticket</div>
+    <div class="tab" id="tab-my" onclick="switchTab('my')" data-t="My Tickets">My Tickets</div>
 </div>
 <div id="notification-bar">
     <span id="notification-text"></span>
@@ -3558,9 +4170,11 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 <div class="content">
     <!-- New Ticket Panel -->
     <div class="panel active" id="panel-new">
+        <div id="ticket-destination" class="ticket-destination"></div>
         <div class="form-group">
             <label>Email</label>
             <input type="text" id="ticket-email" placeholder="Your email address" />
+            <div class="field-hint" data-t="We'll use this address to send you updates about your ticket">We'll use this address to send you updates about your ticket</div>
         </div>
         <div class="form-group">
             <label>Subject</label>
@@ -3583,7 +4197,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
             <div class="form-group">
                 <label>Attachment</label>
                 <div class="attachment-row">
-                    <button class="file-btn" onclick="pickFile()">Add File</button>
+                    <button class="file-btn" onclick="pickFile()" data-t="Add File">Add File</button>
                     <span class="file-name" id="file-name"></span>
                     <span class="file-remove" id="file-remove" style="display:none" onclick="removeFile()">&times;</span>
                 </div>
@@ -3598,7 +4212,7 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
     <div class="panel" id="panel-my">
         <div id="ticket-list-container">
             <div class="ticket-list" id="ticket-list">
-                <div class="loading">Click to load tickets</div>
+                <div class="loading" data-t="Click to load tickets">Click to load tickets</div>
             </div>
             <div class="refresh-row">
                 <button class="btn btn-outline" onclick="refreshTickets()">Refresh</button>
@@ -3611,6 +4225,11 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
             </div>
             <div class="messages" id="conv-messages"></div>
             <div class="conv-attachments" id="conv-attachments" style="display:none"></div>
+            <div class="reply-attachment-row">
+                <button class="file-btn" onclick="pickReplyFile()" data-t="Add File">Add File</button>
+                <span class="file-name" id="reply-file-name"></span>
+                <span class="file-remove" id="reply-file-remove" style="display:none" onclick="removeReplyFile()">&times;</span>
+            </div>
             <div class="reply-area">
                 <textarea id="reply-text" placeholder="Type your reply..."></textarea>
                 <button class="btn btn-primary" id="btn-send-reply" onclick="sendReply()">Send</button>
@@ -3631,6 +4250,8 @@ body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif
 <script>
 var currentTicketId = 0;
 var attachedFile = '';
+var replyAttachedFile = '';
+var pickFileTarget = 'new';
 var ticketsData = [];
 var lastMessageCount = 0;
 var lastReplyCounter = 0;
@@ -3638,6 +4259,52 @@ var pollTimer = null;
 var bgTimer = null;
 var bgReplyCounter = 0;
 var notifyTimer = null;
+
+function statusLabel(s) {
+    switch ((s || '').toLowerCase()) {
+        case 'open': return 'Open';
+        case 'in_progress': return 'In Progress';
+        case 'resolved': return 'Resolved';
+        case 'closed': return 'Closed';
+        default: return s || '';
+    }
+}
+
+function isValidEmail(e) {
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e);
+}
+
+
+var translations = {};
+function t(key) { return translations[key] || key; }
+function applyTranslations() {
+    document.querySelectorAll('[data-t]').forEach(function(el) {
+        if (el.children.length === 0) el.textContent = t(el.getAttribute('data-t'));
+    });
+    document.querySelectorAll('[data-t-title]').forEach(function(el) {
+        el.title = t(el.getAttribute('data-t-title'));
+    });
+    document.querySelectorAll('[data-t-placeholder]').forEach(function(el) {
+        el.placeholder = t(el.getAttribute('data-t-placeholder'));
+    });
+}
+function loadTranslations(extraKeys) {
+    var keySet = {};
+    (extraKeys || []).forEach(function(k) { keySet[k] = 1; });
+    document.querySelectorAll('[data-t],[data-t-title],[data-t-placeholder]').forEach(function(el) {
+        ['data-t','data-t-title','data-t-placeholder'].forEach(function(a) {
+            var v = el.getAttribute(a); if (v) keySet[v] = 1;
+        });
+    });
+    callRust('translate_batch', [JSON.stringify(Object.keys(keySet))]);
+}
+function handleTranslateBatchResult(data) {
+    try {
+        var tr = (typeof data === 'string') ? JSON.parse(data) : data;
+        if (tr && typeof tr === 'object') { for (var k in tr) translations[k] = tr[k]; }
+        applyTranslations();
+    } catch(e) {}
+}
 
 function callRust(method, args) {
     window.ipc.postMessage(JSON.stringify({method: method, args: args || []}));
@@ -3702,6 +4369,7 @@ function switchTab(name) {
 }
 
 function pickFile() {
+    pickFileTarget = 'new';
     callRust('pick_file');
 }
 
@@ -3711,17 +4379,31 @@ function removeFile() {
     document.getElementById('file-remove').style.display = 'none';
 }
 
+function pickReplyFile() {
+    pickFileTarget = 'reply';
+    callRust('pick_file');
+}
+
+function removeReplyFile() {
+    replyAttachedFile = '';
+    document.getElementById('reply-file-name').textContent = '';
+    document.getElementById('reply-file-remove').style.display = 'none';
+}
+
 function submitTicket() {
     var email = document.getElementById('ticket-email').value || '';
     var subject = document.getElementById('ticket-subject').value || '';
     var description = document.getElementById('ticket-description').value || '';
     var priority = document.getElementById('ticket-priority').value || 'medium';
 
+    if (email.trim() === '') { showModal('Error', t('Email is required')); return; }
+    if (!isValidEmail(email.trim())) { showModal('Error', t('Please enter a valid email address')); return; }
     if (subject.trim() === '') { showModal('Error', 'Subject is required'); return; }
     if (description.trim() === '') { showModal('Error', 'Description is required'); return; }
 
     document.getElementById('btn-submit').disabled = true;
-    callRust('submit_ticket', [email, subject, description, priority]);
+    callRust('set_ticket_email', [email.trim()]);
+    callRust('submit_ticket', [email.trim(), subject, description, priority]);
 }
 
 function refreshTickets() {
@@ -3733,10 +4415,18 @@ function openConversation(ticketId) {
     currentTicketId = ticketId;
     lastMessageCount = 0;
     var title = '';
+    var status = '';
     for (var i = 0; i < ticketsData.length; i++) {
-        if (ticketsData[i].id == ticketId) { title = ticketsData[i].title || ''; break; }
+        if (ticketsData[i].id == ticketId) { title = ticketsData[i].title || ''; status = ticketsData[i].status || ''; break; }
     }
-    document.getElementById('conv-title').textContent = title;
+    var titleEl = document.getElementById('conv-title');
+    titleEl.textContent = title;
+    if (status) {
+        var badge = document.createElement('span');
+        badge.className = 'status-badge';
+        badge.textContent = statusLabel(status);
+        titleEl.appendChild(badge);
+    }
     document.getElementById('ticket-list-container').style.display = 'none';
     document.getElementById('conversation-view').classList.add('active');
     document.getElementById('conv-messages').innerHTML = '<div class="loading">Loading...</div>';
@@ -3751,6 +4441,8 @@ function backToList() {
     document.getElementById('ticket-list-container').style.display = 'block';
     stopPolling();
     currentTicketId = 0;
+    removeReplyFile();
+    refreshTickets();
 }
 
 function sendReply() {
@@ -3779,6 +4471,7 @@ function startBgWatch() {
 
 // Async response handler
 window.onRustResponse = function(method, data) {
+    if (method === 'translate_batch_result') { handleTranslateBatchResult(data); return; }
     if (method === 'submit_ticket') {
         document.getElementById('btn-submit').disabled = false;
         try {
@@ -3787,12 +4480,12 @@ window.onRustResponse = function(method, data) {
                 if (attachedFile) {
                     callRust('upload_attachment', [d.ticket_id.toString(), attachedFile]);
                 }
-                document.getElementById('ticket-email').value = '';
                 document.getElementById('ticket-subject').value = '';
                 document.getElementById('ticket-description').value = '';
                 document.getElementById('ticket-priority').value = 'medium';
                 removeFile();
-                showModal('Success', 'Ticket submitted successfully!');
+                showNotification(t('Ticket #{} submitted').replace('{}', d.ticket_id));
+                switchTab('my');
             } else {
                 showModal('Error', (d && d.error) || 'Failed to submit ticket');
             }
@@ -3813,26 +4506,26 @@ window.onRustResponse = function(method, data) {
                 ticketsData = tickets;
                 var el = document.getElementById('ticket-list');
                 if (tickets.length === 0) {
-                    el.innerHTML = '<div class="loading">No tickets found</div>';
+                    el.innerHTML = '<div class="loading">' + t('No tickets found') + '</div>';
                     return;
                 }
                 var html = '';
                 for (var i = 0; i < tickets.length; i++) {
-                    var t = tickets[i];
-                    var date = t.created_at || '';
+                    var tk = tickets[i];
+                    var date = tk.created_at || '';
                     if (date.length > 10) date = date.substring(0, 10);
-                    html += '<div class="ticket-row" onclick="openConversation(' + t.id + ')">';
-                    html += '<span class="subject">' + htmlEscape(t.title || '') + '</span>';
-                    html += '<span class="status">' + htmlEscape(t.status || '') + '</span>';
+                    html += '<div class="ticket-row" onclick="openConversation(' + tk.id + ')">';
+                    html += '<span class="subject">' + htmlEscape(tk.title || '') + '</span>';
+                    html += '<span class="status">' + htmlEscape(statusLabel(tk.status || '')) + '</span>';
                     html += '<span class="date">' + htmlEscape(date) + '</span>';
                     html += '</div>';
                 }
                 el.innerHTML = html;
             } else {
-                document.getElementById('ticket-list').innerHTML = '<div class="loading">No tickets found</div>';
+                document.getElementById('ticket-list').innerHTML = '<div class="loading">' + t('No tickets found') + '</div>';
             }
         } catch(e) {
-            document.getElementById('ticket-list').innerHTML = '<div class="status-msg error">Failed to load tickets</div>';
+            document.getElementById('ticket-list').innerHTML = '<div class="status-msg error">' + t('Failed to load tickets') + '</div>';
         }
     } else if (method === 'get_conversation') {
         try {
@@ -3870,7 +4563,7 @@ window.onRustResponse = function(method, data) {
             var atts = (typeof data === 'string') ? JSON.parse(data) : data;
             var el = document.getElementById('conv-attachments');
             if (Array.isArray(atts) && atts.length > 0) {
-                var html = '<label>Attachments:</label>';
+                var html = '<label>' + t('Attachments:') + '</label>';
                 for (var i = 0; i < atts.length; i++) {
                     var a = atts[i];
                     html += '<div class="att-item" onclick="callRust(\'open_url\',[\'' + htmlEscape(a.download_url || '') + '\'])">' +
@@ -3891,19 +4584,60 @@ window.onRustResponse = function(method, data) {
             var d = (typeof data === 'string') ? JSON.parse(data) : data;
             if (d && d.success) {
                 document.getElementById('reply-text').value = '';
+                if (replyAttachedFile) {
+                    callRust('upload_attachment', [currentTicketId.toString(), replyAttachedFile]);
+                    removeReplyFile();
+                    callRust('get_attachments', [currentTicketId.toString()]);
+                }
+                if (d.reopened) { showNotification(t('Ticket reopened')); }
                 callRust('get_conversation', [currentTicketId.toString()]);
             }
         } catch(e) {}
     } else if (method === 'pick_file') {
         if (data && data !== '' && data !== '""') {
             var path = (typeof data === 'string') ? data.replace(/^"|"$/g, '') : data;
+            if (path === 'TOO_LARGE') {
+                showModal('Error', t('File is too large (max 5 MB)'));
+                return;
+            }
             if (path) {
-                attachedFile = path;
                 var name = path.replace(/^.*[\\\/]/, '');
-                document.getElementById('file-name').textContent = name;
-                document.getElementById('file-remove').style.display = 'inline';
+                if (pickFileTarget === 'reply') {
+                    replyAttachedFile = path;
+                    document.getElementById('reply-file-name').textContent = name;
+                    document.getElementById('reply-file-remove').style.display = 'inline';
+                } else {
+                    attachedFile = path;
+                    document.getElementById('file-name').textContent = name;
+                    document.getElementById('file-remove').style.display = 'inline';
+                }
             }
         }
+    } else if (method === 'get_ticket_destination') {
+        try {
+            var dd = (typeof data === 'string') ? JSON.parse(data) : data;
+            var el = document.getElementById('ticket-destination');
+            var submitBtn = document.getElementById('btn-submit');
+            if (dd && dd.linked === false) {
+                el.className = 'ticket-destination warn';
+                el.textContent = t('This device is not connected to a dashboard. Tickets cannot be submitted.');
+                submitBtn.disabled = true;
+            } else {
+                el.className = 'ticket-destination';
+                var company = (dd && dd.name) ? dd.name : t('your support team');
+                var msg = t('Your ticket will be sent to {}').replace('{}', company);
+                if (dd && dd.support_email) {
+                    msg += ' ' + t('You can also email {}').replace('{}', dd.support_email);
+                } else if (dd && dd.phone) {
+                    msg += ' ' + t('You can also call {}').replace('{}', dd.phone);
+                }
+                el.textContent = msg;
+                submitBtn.disabled = false;
+            }
+        } catch(e) {}
+    } else if (method === 'get_ticket_email') {
+        var em = (typeof data === 'string') ? data.replace(/^'|'$/g, '').replace(/^"|"$/g, '') : '';
+        if (em) { document.getElementById('ticket-email').value = em; }
     } else if (method === 'get_ticket_reply_counter') {
         var counter = parseInt(data) || 0;
         if (typeof lastReplyCounter === 'undefined' || lastReplyCounter === 0) {
@@ -3939,8 +4673,15 @@ window.onRustResponse = function(method, data) {
 
 // Init: check dark theme
 callRust('get_option', ['allow-darktheme']);
+callRust('get_ticket_destination');
+callRust('get_ticket_email');
 // Start background reply counter watch
 startBgWatch();
+loadTranslations(['No tickets found','Failed to load tickets','Attachments:',
+    'Email is required','Please enter a valid email address','Ticket reopened',
+    'your support team','Your ticket will be sent to {}','You can also email {}',
+    'You can also call {}','This device is not connected to a dashboard. Tickets cannot be submitted.',
+    'Ticket #{} submitted','File is too large (max 5 MB)']);
 </script>
 </body>
 </html>"##.to_string()
@@ -4011,6 +4752,13 @@ fn handle_ipc_message(message: &str) {
                 "get_fav_json" => {
                     let json = ui.get_fav_json();
                     send_to_webview("get_fav_json", &format!("'{}'", json));
+                }
+                "get_ab" => {
+                    let json = ui.get_ab();
+                    send_to_webview("get_ab", &format!("'{}'", json.replace('\'', "\\'")));
+                }
+                "save_ab" => {
+                    ui.save_ab(arg_s(args, 0));
                 }
                 "get_lan_peers" => {
                     let json = ui.get_lan_peers();
@@ -4549,6 +5297,30 @@ fn handle_ipc_message(message: &str) {
                         session.switch_sides();
                     }
                 }
+                "request_add_to_dashboard" => {
+                    if let Some(ref session) = *CUR_SESSION.lock().unwrap() {
+                        session.request_add_to_dashboard();
+                    }
+                }
+                "has_dashboard_link" => {
+                    let val = CUR_SESSION.lock().unwrap().as_ref().map(|s| s.has_dashboard_link()).unwrap_or(false);
+                    send_to_webview("has_dashboard_link", &format!("{}", val));
+                }
+                "terminal_input" => {
+                    if let Some(ref session) = *CUR_SESSION.lock().unwrap() {
+                        session.send_terminal_input(0, arg_s(args, 0));
+                    }
+                }
+                "terminal_resize" => {
+                    let rows = arg_i(args, 0);
+                    let cols = arg_i(args, 1);
+                    if rows > 0 && cols > 0 {
+                        if let Some(ref session) = *CUR_SESSION.lock().unwrap() {
+                            session.ui_handler.resize_terminal(0, rows as u16, cols as u16);
+                            session.send_terminal_resize(0, rows, cols);
+                        }
+                    }
+                }
                 "refresh" => {
                     if let Some(ref session) = *CUR_SESSION.lock().unwrap() {
                         session.refresh_video(0);
@@ -4689,6 +5461,9 @@ fn handle_ipc_message(message: &str) {
                         cm.decline_invite(arg_i(args, 0));
                     }
                 }
+                "cm_link_dashboard_response" => {
+                    crate::ui_cm_interface::handle_link_dashboard_response(arg_i(args, 0), arg_b(args, 1));
+                }
                 "cm_remove_disconnected" => {
                     if let Some(ref cm) = *CM_INSTANCE.lock().unwrap() {
                         cm.remove_disconnected_connection(arg_i(args, 0));
@@ -4718,6 +5493,17 @@ fn handle_ipc_message(message: &str) {
                 "add_reply" => {
                     let result = ui.add_reply(arg_s(args, 0), arg_s(args, 1));
                     send_to_webview("add_reply", &format!("'{}'", result));
+                }
+                "get_ticket_destination" => {
+                    let result = ui.get_ticket_destination();
+                    send_to_webview("get_ticket_destination", &format!("'{}'", result));
+                }
+                "get_ticket_email" => {
+                    let result = ui.get_ticket_email();
+                    send_to_webview("get_ticket_email", &format!("'{}'", result.replace('\'', "\\'")));
+                }
+                "set_ticket_email" => {
+                    ui.set_ticket_email(arg_s(args, 0));
                 }
                 "upload_attachment" => {
                     let result = ui.upload_attachment(arg_s(args, 0), arg_s(args, 1));
@@ -4754,9 +5540,23 @@ fn handle_ipc_message(message: &str) {
 }
 
 fn resolve_hostname(hostname: &str) -> Option<String> {
-    let mut addrs = (hostname, 0).to_socket_addrs().ok()?;
+    // Split off port if present (e.g. "rmt.myddns.com:21118" → host="rmt.myddns.com", port="21118")
+    let (host, port) = if let Some(colon_pos) = hostname.rfind(':') {
+        let after = &hostname[colon_pos + 1..];
+        if after.chars().all(|c| c.is_ascii_digit()) && !after.is_empty() {
+            (&hostname[..colon_pos], Some(after))
+        } else {
+            (hostname, None)
+        }
+    } else {
+        (hostname, None)
+    };
+    let mut addrs = (host, 0).to_socket_addrs().ok()?;
     let ip = addrs.next()?.ip().to_string();
-    Some(ip)
+    match port {
+        Some(p) => Some(format!("{}:{}", ip, p)),
+        None => Some(ip),
+    }
 }
 
 fn is_numeric_id(peer_id: &str) -> bool {
@@ -4981,6 +5781,34 @@ impl UI {
     fn store_fav_from_json(&self, json: String) {
         if let Ok(fav) = serde_json::from_str::<Vec<String>>(&json) {
             store_fav(fav);
+        }
+    }
+
+    fn get_ab(&self) -> String {
+        let ab = hbb_common::config::Ab::load();
+        let entry = ab
+            .ab_entries
+            .into_iter()
+            .find(|e| e.personal())
+            .unwrap_or_else(|| hbb_common::config::AbEntry {
+                name: "My address book".to_string(),
+                ..Default::default()
+            });
+        serde_json::to_string(&entry).unwrap_or_else(|_| "{}".to_string())
+    }
+
+    fn save_ab(&self, entry_json: String) {
+        if let Ok(mut entry) = serde_json::from_str::<hbb_common::config::AbEntry>(&entry_json) {
+            if entry.name.is_empty() {
+                entry.name = "My address book".to_string();
+            }
+            let ab = hbb_common::config::Ab {
+                access_token: String::new(),
+                ab_entries: vec![entry],
+            };
+            if let Ok(j) = serde_json::to_string(&ab) {
+                hbb_common::config::Ab::store(j);
+            }
         }
     }
 
@@ -5265,9 +6093,30 @@ impl UI {
     fn add_reply(&self, ticket_id: String, message: String) -> String {
         let tid: i64 = ticket_id.parse().unwrap_or(0);
         match crate::dashboard::add_reply(tid, &message) {
-            Ok(()) => serde_json::json!({"success": true}).to_string(),
+            Ok(reopened) => serde_json::json!({"success": true, "reopened": reopened}).to_string(),
             Err(e) => serde_json::json!({"success": false, "error": e.to_string()}).to_string(),
         }
+    }
+
+    fn get_ticket_destination(&self) -> String {
+        let linked = !crate::dashboard::get_dashboard_user_id().is_empty();
+        let contact = crate::dashboard::fetch_support_contact()
+            .unwrap_or_else(|_| serde_json::json!({}));
+        serde_json::json!({
+            "linked": linked,
+            "name": contact["name"].as_str().unwrap_or(""),
+            "support_email": contact["support_email"].as_str().unwrap_or(""),
+            "phone": contact["phone"].as_str().unwrap_or(""),
+        })
+        .to_string()
+    }
+
+    fn get_ticket_email(&self) -> String {
+        hbb_common::config::Config::get_option("ticket-email")
+    }
+
+    fn set_ticket_email(&self, email: String) {
+        hbb_common::config::Config::set_option("ticket-email".to_owned(), email);
     }
 
     fn upload_attachment(&self, ticket_id: String, file_path: String) -> String {
@@ -5279,7 +6128,23 @@ impl UI {
     }
 
     fn pick_file(&self) -> String {
-        "".to_string()
+        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        {
+            const MAX_SIZE: u64 = 5 * 1024 * 1024;
+            if let Some(path) = rfd::FileDialog::new().pick_file() {
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if meta.len() > MAX_SIZE {
+                        return "TOO_LARGE".to_string();
+                    }
+                }
+                return path.to_string_lossy().to_string();
+            }
+            "".to_string()
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+        {
+            "".to_string()
+        }
     }
 
     fn get_ticket_reply_counter(&self) -> String {

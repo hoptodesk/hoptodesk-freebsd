@@ -279,6 +279,13 @@ pub enum Data {
     StartVoiceCall,
     VoiceCallResponse(bool),
     CloseVoiceCall(String),
+    LinkDashboardIncoming {
+        account_name: String,
+        existing_account_name: String,
+    },
+    LinkDashboardResponse(bool),
+    LinkDashboardTimeout,
+    DashboardRelinked,
     #[cfg(all(feature = "flutter", feature = "plugin_framework"))]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Plugin(Plugin),
@@ -314,7 +321,7 @@ pub enum Data {
     },
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     Whiteboard((String, crate::whiteboard::CustomEvent)),
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux", target_os = "freebsd"))]
     PrinterData(Vec<u8>),
 }
 
@@ -418,8 +425,21 @@ impl CheckIfRestart {
 }
 
 #[cfg(not(target_os = "ios"))]
+pub async fn notify_dashboard_relinked() -> ResultType<()> {
+    let mut conn = connect(1000, "").await?;
+    conn.send(&Data::DashboardRelinked).await?;
+    Ok(())
+}
+
 async fn handle(data: Data, stream: &mut Connection) {
     match data {
+        Data::DashboardRelinked => {
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            {
+                log::info!("IPC: DashboardRelinked received, starting dashboard");
+                std::thread::spawn(|| crate::dashboard::start());
+            }
+        }
         Data::SystemInfo(_) => {
             let info = format!(
                 "log_path: {}, config: {}, username: {}",
